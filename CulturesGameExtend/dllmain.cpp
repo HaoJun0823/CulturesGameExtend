@@ -11,6 +11,7 @@
 // 内置 Feature 的实现文件。
 #include "Features/CulturesPatchesFeature.cpp"
 #include "Features/UserCampaignsFeature.cpp"
+#include "Features/AsgardCampaignFeature.cpp"
 
 namespace {
 
