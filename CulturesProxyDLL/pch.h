@@ -10,4 +10,14 @@
 // 添加要在此处预编译的标头
 #include "framework.h"
 
+// 标准库（预编译以提速）
+#include <string>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <mutex>
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+
 #endif //PCH_H

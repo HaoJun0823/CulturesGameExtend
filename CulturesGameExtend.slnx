@@ -1,8 +1,7 @@
 <Solution>
   <Configurations>
-    <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="CulturesGameExtend/CulturesGameExtend.vcxproj" />
-  <Project Path="CulturesProxyDLL/CulturesProxyDLL.vcxproj" />
+  <Project Path="CulturesGameExtend/CulturesGameExtend.vcxproj" Id="8e7903d5-da04-480f-8d98-95235e599e74" />
+  <Project Path="CulturesProxyDLL/CulturesProxyDLL.vcxproj" Id="8ae36c9d-4269-4d58-ba51-9501158802bc" />
 </Solution>

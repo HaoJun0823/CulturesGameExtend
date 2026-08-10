@@ -10,4 +10,21 @@
 // 添加要在此处预编译的标头
 #include "framework.h"
 
+// 标准库（预编译以提速）
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <unordered_map>
+#include <fstream>
+#include <sstream>
+#include <cstdio>
+#include <cstdarg>
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <mutex>
+
+// 文件系统兼容层（v141_xp 下自动回退到 experimental）
+#include "Core/fs_compat.h"
+
 #endif //PCH_H

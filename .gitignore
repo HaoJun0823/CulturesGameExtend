@@ -361,3 +361,15 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# ============================================================
+# CulturesGameExtend project-specific
+# ============================================================
+# CodeBuddy IDE tool data (plans, etc.) - not part of the source repo
+.codebuddy/
+
+# Build artifacts
+*.dll
+*.exe
+*.lib
+*.exp
