@@ -40,12 +40,50 @@ constexpr uintptr_t R_IatCreateWindowExA = 0xF31D4;
 constexpr uintptr_t R_IatSendMessageA    = 0xF31B8;
 
 // ---- 运行时状态 ----
-static HWND     g_mainHwnd = nullptr;   // 游戏主窗口（首个顶层窗口）
-static LONG     g_done     = 0;         // 只处理一次主窗口
+static HWND     g_mainHwnd = nullptr;   // 记录到的主窗口（仅日志）
+static LONG     g_logOnce  = 0;         // 调试日志只打一次
 static wchar_t  g_title[128] = L"";     // 配置标题（UTF-16）
 
 static decltype(&CreateWindowExA) pRealCreateWindowExA = nullptr;
 static decltype(&SendMessageA)    pRealSendMessageA    = nullptr;
+
+// ===================================================================
+// 轮询兜底：游戏若在 IAT hook 之前缓存了 SendMessageA 地址（见
+// sub_401000 `mov edi, ds:SendMessageA; call edi`），或通过其它途径
+// 设置标题，hook 可能拦不到。此线程每 0.5s 检查主窗口标题，不符即修正。
+// ===================================================================
+static void FindMainWindow() {
+    if (g_mainHwnd && IsWindow(g_mainHwnd)) return;
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        if (!IsWindowVisible(hwnd)) return TRUE;
+        if (GetWindow(hwnd, GW_OWNER)) return TRUE;      // 跳过 owned（对话框等）
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid != GetCurrentProcessId()) return TRUE;   // 只认本进程
+        *(HWND*)lp = hwnd;
+        return FALSE;                                    // 第一个可见顶层窗口
+    }, (LPARAM)&g_mainHwnd);
+}
+
+static DWORD WINAPI TitleWatcher(LPVOID) {
+    while (g_title[0]) {
+        FindMainWindow();
+        if (g_mainHwnd && IsWindow(g_mainHwnd)) {
+            wchar_t cur[128] = L"";
+            GetWindowTextW(g_mainHwnd, cur, 128);
+            if (wcscmp(cur, g_title) != 0) {
+                SetWindowTextW(g_mainHwnd, g_title);
+                if (!g_logOnce) {
+                    g_logOnce = 1;
+                    LOG_INFO(kCat, "watcher: corrected title of 0x%X",
+                             (unsigned)(uintptr_t)g_mainHwnd);
+                }
+            }
+        }
+        Sleep(500);
+    }
+    return 0;
+}
 
 // ===================================================================
 // HookCreateWindowExA —— 创建窗口时接管
@@ -59,23 +97,32 @@ static HWND WINAPI HookCreateWindowExA(
     HWND hw = pRealCreateWindowExA(dwExStyle, lpClassName, lpWindowName, dwStyle,
                                    X, Y, nWidth, nHeight, hWndParent, hMenu,
                                    hInstance, lpParam);
-    if (hw && !hWndParent && !g_done && g_title[0]) {
-        g_done   = 1;
-        g_mainHwnd = hw;
+    if (hw && !hWndParent && g_title[0]) {
+        if (!g_mainHwnd) g_mainHwnd = hw;
         SetWindowTextW(hw, g_title);
+        if (!g_logOnce) {
+            g_logOnce = 1;
+            LOG_INFO(kCat, "top-level window created 0x%X, title applied",
+                     (unsigned)(uintptr_t)hw);
+        }
     }
     return hw;
 }
 
 // ===================================================================
-// HookSendMessageA —— 拦截对主窗口的 WM_SETTEXT（0xC）
-//   游戏创建后若再用 SendMessageA(WM_SETTEXT) 覆盖标题（ANSI 路径），
-//   这里改走 SendMessageW + 宽字符标题，保证中文不乱码。
-//   仅当 hwnd == 主窗口 时替换；其余消息/窗口原样转发。
+// HookSendMessageA —— 拦截对顶层窗口的 WM_SETTEXT（0xC）
+//   游戏创建后通过 SendMessageA(hwnd, WM_SETTEXT, ..., "Saga") 覆盖标题
+//   （ANSI 路径）。这里对**任意顶层窗口**（无 WS_CHILD 样式）的 WM_SETTEXT
+//   改走 SendMessageW + 宽字符标题，防覆盖且中文不乱码。
+//   子窗口（按钮/编辑框等）的 WM_SETTEXT 原样放行，零副作用。
 // ===================================================================
 static LRESULT WINAPI HookSendMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) {
-    if (Msg == WM_SETTEXT && hWnd == g_mainHwnd && g_title[0]) {
-        return SendMessageW(hWnd, Msg, wParam, (LPARAM)g_title);
+    if (Msg == WM_SETTEXT && g_title[0] && hWnd) {
+        DWORD style = GetWindowLongW(hWnd, GWL_STYLE);
+        if (!(style & WS_CHILD)) {          // 顶层窗口（主窗口/对话框）
+            if (!g_mainHwnd) g_mainHwnd = hWnd;
+            return SendMessageW(hWnd, Msg, wParam, (LPARAM)g_title);
+        }
     }
     return pRealSendMessageA(hWnd, Msg, wParam, lParam);
 }
@@ -128,9 +175,12 @@ public:
             return false;
         }
 
-        LOG_INFO(kCat, "installed: main-window title -> L\"%ls\" (IAT@0x%X/0x%X)",
-                 g_title,
-                 (unsigned)(b + R_IatCreateWindowExA), (unsigned)(b + R_IatSendMessageA));
+        LOG_INFO(kCat, "installed: title override active (utf8len=%d wide=%d)",
+                 (int)title.size(), n);
+
+        // 启动轮询兜底线程（hook 拦不到时 0.5s 内强制修正）
+        HANDLE h = CreateThread(nullptr, 0, TitleWatcher, nullptr, 0, nullptr);
+        if (h) CloseHandle(h);
         return true;
     }
 };
