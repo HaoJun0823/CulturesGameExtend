@@ -25,10 +25,16 @@ SDK_LIB_UCRT="C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x86"
 SDK_LIB_UM="C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x86"
 
 echo "==> [1/3] 编译 (cl, Release|Win32 等价配置)"
+# 版本号：从最近 git tag（vX.Y.Z-*）自动提取主版本，注入 VersionStamp 编译宏。
+# 例：v0.4.0-milestone -> "0.4.0"；无 tag 时回退 0.0.0。
+CGE_VER=$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//; s/-.*//')
+[ -z "$CGE_VER" ] && CGE_VER="0.0.0"
+echo "==> 注入版本: CGE_VERSION_STR=\"$CGE_VER\""
 cd "$SRC_DIR"
 "$CL" /nologo /LD /EHsc /Y- /utf-8 /std:c++17 /O2 \
   /D WIN32 /D NDEBUG /D CULTURESGAMEEXTEND_EXPORTS /D _WINDOWS /D _USRDLL \
   /D _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING \
+  /D "CGE_VERSION_STR=\"$CGE_VER\"" \
   /I. "/I$MSVC_INC" "/I$SDK_INC_UCRT" "/I$SDK_INC_UM" "/I$SDK_INC_SHARED" \
   dllmain.cpp Core/Logger.cpp Core/IniConfig.cpp Core/GameVersion.cpp \
   Core/GameApi.cpp Core/Patch.cpp Core/FeatureManager.cpp \
