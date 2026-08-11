@@ -12,6 +12,8 @@
 #include "Features/CulturesPatchesFeature.cpp"
 #include "Features/UserCampaignsFeature.cpp"
 #include "Features/AsgardCampaignFeature.cpp"
+#include "Features/Cultures2CampaignFeature.cpp"
+#include "Features/UnlockAllCampaignsFeature.cpp"
 
 namespace {
 

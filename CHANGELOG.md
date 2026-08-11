@@ -6,6 +6,39 @@
 
 ---
 
+## v0.3.0 — 文化II 战役屏可加载 + 全解锁 Feature（里程碑，2026-08-11）
+
+> 里程碑：主菜单"文化II：阿斯加德之门"按钮可用、点击进入文化II 大地图、成功进入第一关、不崩溃。
+
+### 新增功能
+- **Cultures2Campaign Feature —— 文化II 战役屏加载（里程碑落地）**
+  - 复用主菜单 **screen 5（北国风云模板）**，进入前把 **7 处战役相关立即数**切换到文化II 数据表：
+    - handler 5 处：`cmp ecx,2→1`（战役号）、节点坐标表基址 `0x5089F8 → DLL 内 kNodesC2`；
+    - painter 2 处：路线表 `0x4F7EE8 → DLL 内 kRoutesC2`、`push 2 → push 1`（战役号）。
+  - 三个 hook（全部 DLL 驻留，零 code cave）：
+    1. `SwitchScreen` 入口仲裁 @ `0x4D1E45`：进 screen 5 前按 `g_pendingC2` 决定用哪套数据；**粘性模式**（离开 screen 5 才复位，修复"翻回北国风云"白屏 bug）。
+    2. `MainMenu_OnCommand` 跳表 slot[6] @ `0x4D62BD`：ctl `5006` 原版空闲 → 指向 `CmdAsgardStub`（`g_pendingC2=1` + `SwitchScreen(5)`）。
+    3. `start_campaign_1_screen` 消费尾部 @ `0x40223B`：通关后回文化II 大地图而非北国风云。
+  - **白屏 bug 修复**：全程序 44 个 `AddUnlock` 调用点无一解锁 campaign 1（文化II 从未被引擎初始化），故首次进入时调用引擎 `AddUnlock(0x416D62)` 播种首关 `node 10`（只首关，后续由通关流程逐步解锁）。
+  - DLL 内数据表：`kNodesC2[]`(10 节点，源原版 Gates of Asgard)、`kRoutesC2[]`(9 路线 → bmd 帧 26..34)。
+  - **bmd 前置**：`Data\gui\lang\ger\bobs\ls_menu_logos.bmd` 须为 35 帧版（原 26 + 文化II 路线帧 26-34，已部署）。
+- **UnlockAllCampaigns Feature —— 无视进度全解锁**
+  - hook `sub_416E20`(IsUnlocked) 恒返回 1（DLL 内 `IsUnlockedStub`：`mov eax,1 / ret 8`）。
+  - IsUnlocked 仅决定"关卡可否游玩"，完成判定走另一张表 → 全解锁不影响通关记录完整性。
+  - 调用面：全程序仅 6 处（均在战役屏 handler/painter），主菜单战役是否列出由地图数据决定、与此无关 → 一处 hook 即覆盖所有战役所有关卡。
+  - 默认关闭（`Enabled = 0`），改 `1` 即生效，无需重编。
+- **Asgard 按钮 ctlId 由 5015 → 5006**：5015 原版已占（= UserCampaign00 屏，是"点了跳错"根因）；5006 跳表项现由 Cultures2Campaign 接管。
+
+### 配置
+```ini
+[Cultures2Campaign]
+Enabled = 1
+[UnlockAllCampaigns]
+Enabled = 0        ; 1 = 无视 campaign.ini 解锁全部战役/关卡
+```
+
+---
+
 ## v0.2.0 — AsgardCampaign 战役入口（2026-08-10, commit `ac68242`）
 
 ### 新增功能

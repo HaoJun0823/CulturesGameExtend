@@ -7,18 +7,31 @@
 // 原理：case 3 每个战役按钮都是内联的"new(0x60) → GetSagaText(文本对) →
 // UI_CreateButton → UI_AddButton → 坐标累加"序列。本 Feature hook
 // Nordland 按钮对象创建点（0x4D295E call operator new，5 字节 E8），
-// 跳转到 code cave；cave 在栈帧内（EBP 未变）先用游戏自身 API 完整创建
-// Asgard 按钮 + 坐标累加，再跳回 0x4D2963 继续原流程创建 Nordland。
+// 跳转到本 DLL 的 AsgardButtonStub；stub 在同一栈帧内（EBP/ESI 均由
+// MainMenuUI_Build 继承）先用游戏自身 API 完整创建 Asgard 按钮 +
+// 坐标累加，再跳回 0x4D2963 继续原流程创建 Nordland。
+//
+// 实现方式说明（2026-08 重构）：
+//   旧版把这段逻辑编码为 121 字节机器码数组写进 game.exe 的 .text 填充区
+//   （code cave），需手算 8 处 rel32 且不可调试。现改为 __declspec(naked)
+//   内联汇编函数，直接驻留本 DLL：
+//     - game.exe 无 ASLR（RELOCS_STRIPPED）且非 LARGE_ADDRESS_AWARE，
+//       用户态上限 0x7FFFFFFF，E9 rel32(±2GB) 必定可达本 DLL，无距离风险；
+//     - 所有游戏函数调用一律 call dword ptr [全局指针]，跳回用
+//       jmp dword ptr [g_ret]，全程零手算 rel32；
+//     - 唯一需要计算的 rel32 是 hook 点那条 E9，属标准 hook 写入。
+//   已不再占用 game.exe 的 code cave，CodeCaveStart 配置项对本 Feature 作废。
 //
 // 按钮文本：saga 表（表13, saga001.ini）ID 25/26 —— 已在
 //   Data\text\l10\strings\saga\saga001.ini 添加（l10 汉化版）。
-// 控件 ID：0x1397 (5015)，case 3 中空闲（5010-5014/5017/5018 已用）。
+// 控件 ID：0x138E (5006)。注：原 0x1397(5015) 原版已占 = UserCampaign00 屏，
+// 这正是「点了跳到别处」的根因；现改由 Cultures2CampaignFeature 接管 5006
+// 跳表项，本按钮只负责「画在单人游戏界面上」这一件事。
 //
 // 配置（plugins/config/CulturesGameExtend_Game.ini）：
 //   [AsgardCampaign]
 //   Enabled = 1
 //   ; AddButton = 1   （是否插入按钮；0=禁用插入）
-//   ; CodeCaveStart = 0xF22CB  （默认在 CulturesPatches 的 cave 区之后）
 // ===================================================================
 #include "pch.h"
 #include "Core/Feature.h"
@@ -38,87 +51,96 @@ const char* kCat  = "[AsgardCampaign]";
 constexpr uintptr_t HOOK = 0xD295E;  // VA 0x4D295E：call operator new（Nordland 按钮对象）
 constexpr uintptr_t RET  = 0xD2963;  // VA 0x4D2963：跳回点（cmp eax, ebx 继续原流程）
 
-// ---- cave 引用的游戏函数（RVA）----
-constexpr uintptr_t F_New        = 0xE55BD; // VA 0x4E55BD operator new
+// ---- stub 引用的游戏函数 / 全局（RVA）----
+constexpr uintptr_t F_New        = 0xE55BD; // VA 0x4E55BD operator new(uint)
 constexpr uintptr_t F_GetSagaTxt = 0xE169E; // VA 0x4E169E StringTable_GetSagaText(id) = 表13
 constexpr uintptr_t F_CreateBtn  = 0xB7C2E; // VA 0x4B7C2E UI_CreateButton
-constexpr uintptr_t F_Sub439B9C  = 0x39B9C; // VA 0x439B9C 按钮挂到界面（thiscall ecx=esi+8）
+constexpr uintptr_t F_Sub439B9C  = 0x39B9C; // VA 0x439B9C 按钮挂到界面（thiscall ecx=edi）
 constexpr uintptr_t F_AddBtn     = 0x768DA; // VA 0x4768DA UI_AddButton（thiscall ecx=dword_554F20）
-constexpr int kAsgardCtlId = 0x1397;         // 5015（空闲控件 ID）
-constexpr int kAsgardTextA = 0x19;           // saga 表 ID 25（战役名）
-constexpr int kAsgardTextB = 0x1A;           // saga 表 ID 26（提示）
+constexpr uintptr_t D_UiRoot     = 0x154F20;// VA 0x554F20 UI 根对象槽位
 
-// ---- cave 机器码（121 字节）----
-// 布局（offset: 指令）：
-//   0   call operator new        （重放被覆盖指令；eax = Nordland 对象）
-//   5   push eax                 （暂存 Nordland 对象）
-//   6   push 60h; 8 call new     （Asgard 按钮对象 → eax）
-//   13  pop ecx                  （清 cdecl 参数 60h —— 原代码 0x4D2965 同款）
-//   14  mov [ebp-4], eax
-//   17  cmp eax, ebx; 19 jz +0x2F（new 失败跳 asgard_skip@68）
-//   21  lea eax,[esi+216Ch]; push eax; push 1397h; push 1Ah
-//   35  call GetSagaText; pop ecx; push eax; push 19h
-//   44  call GetSagaText; pop ecx
-//   50  mov ecx,[ebp-4]; push eax; lea eax,[ebp-14h]; push eax
-//   58  call UI_CreateButton; mov [ebp-4], eax
-//   66  jmp +3 -> 71
-//   68  asgard_skip: mov [ebp-4], ebx
-//   71  asgard_add: push [ebp-4]
-//   74  mov ecx, edi
-//   76  call sub_439B9C; mov ecx, dword_554F20(81); push 1(87); push [ebp-4](89)
-//   92  call UI_AddButton
-//   97  mov eax,[ebp-10h]; mov ecx,[ebp-8](100); lea eax,[eax+ecx+0Ah](103)
-//   107 mov [ebp-10h], eax      （坐标累加，同 Nordland 的 0x4D29B7）
-//   110 pop eax                 （恢复 Nordland 对象）
-//   111 jmp RET
-static const uint8_t kCave[121] = {
-    0xE8,0,0,0,0,                          // 0   call ??2@YAPAXI@Z
-    0x50,                                  // 5   push eax
-    0x6A,0x60,                             // 6   push 60h
-    0xE8,0,0,0,0,                          // 8   call ??2@YAPAXI@Z
-    0x59,                                  // 13  pop ecx
-    0x89,0x45,0xFC,                        // 14  mov [ebp-4], eax
-    0x3B,0xC3,                             // 17  cmp eax, ebx
-    0x74,0x2F,                             // 19  jz +0x2F (->68)
-    0x8D,0x86,0x6C,0x21,0x00,0x00,         // 21  lea eax,[esi+216Ch]
-    0x50,                                  // 27  push eax
-    0x68,0x97,0x13,0x00,0x00,              // 28  push 1397h
-    0x6A,0x1A,                             // 33  push 1Ah
-    0xE8,0,0,0,0,                          // 35  call GetSagaText
-    0x59,                                  // 40  pop ecx
-    0x50,                                  // 41  push eax
-    0x6A,0x19,                             // 42  push 19h
-    0xE8,0,0,0,0,                          // 44  call GetSagaText
-    0x59,                                  // 49  pop ecx
-    0x8B,0x4D,0xFC,                        // 50  mov ecx,[ebp-4]
-    0x50,                                  // 53  push eax
-    0x8D,0x45,0xEC,                        // 54  lea eax,[ebp-14h]
-    0x50,                                  // 57  push eax
-    0xE8,0,0,0,0,                          // 58  call UI_CreateButton
-    0x89,0x45,0xFC,                        // 63  mov [ebp-4], eax
-    0xEB,0x03,                             // 66  jmp +3 (->71)
-    0x89,0x5D,0xFC,                        // 68  mov [ebp-4], ebx
-    0xFF,0x75,0xFC,                        // 71  push [ebp-4]
-    0x8B,0xCF,                             // 74  mov ecx, edi
-    0xE8,0,0,0,0,                          // 76  call sub_439B9C
-    0x8B,0x0D,0x20,0x4F,0x55,0x00,         // 81  mov ecx, dword_554F20
-    0x6A,0x01,                             // 87  push 1
-    0xFF,0x75,0xFC,                        // 89  push [ebp-4]
-    0xE8,0,0,0,0,                          // 92  call UI_AddButton
-    0x8B,0x45,0xF0,                        // 97  mov eax,[ebp-10h]
-    0x8B,0x4D,0xF8,                        // 100 mov ecx,[ebp-8]
-    0x8D,0x44,0x08,0x0A,                   // 103 lea eax,[eax+ecx+0Ah]
-    0x89,0x45,0xF0,                        // 107 mov [ebp-10h], eax
-    0x58,                                  // 110 pop eax
-    0xE9,0,0,0,0                           // 111 jmp RET
+// ---- 运行时绑定的跳转目标（stub 通过间接寻址引用，免手算 rel32）----
+static void* p_operatorNew   = nullptr;
+static void* p_getSagaText   = nullptr;
+static void* p_createButton  = nullptr;
+static void* p_sub439B9C     = nullptr;
+static void* p_uiAddButton   = nullptr;
+static void* p_ret           = nullptr;   // 0x4D2963
+static void* p_uiRootSlot    = nullptr;   // &dword_554F20（取址，非取值）
+
+// ---- 常量（内联汇编中作为立即数引用）----
+enum : int {
+    kAsgardCtlId = 0x138E,  // 5006，MainMenu_OnCommand 跳表 slot[6] 空闲控件 ID
+    kTextName    = 0x19,    // saga 表 ID 25：战役名
+    kTextHint    = 0x1A,    // saga 表 ID 26：提示
+    kBtnObjSize  = 0x60     // 按钮对象大小，与 Nordland 一致
 };
 
-static void FillRel(uint8_t* buf, size_t off, uintptr_t base,
-                    uintptr_t fromOff, uintptr_t toOff) {
-    // E8/E9 均为 5 字节（1 操作码 + 4 rel32），rel32 写在 opcode 之后：off+1
-    // rel32 = to - (from + 5)
-    int32_t rel = (int32_t)((base + toOff) - (base + fromOff + 5));
-    memcpy(buf + off + 1, &rel, 4);
+// ===================================================================
+// AsgardButtonStub —— 寄生在 MainMenuUI_Build 栈帧内执行
+//   进入条件：由 0x4D295E 的 E9 跳入，此时
+//     EBP = MainMenuUI_Build 栈帧      ESI = 主菜单 UI 对象(this)
+//     EDI = 按钮容器                    EBX = 0
+//   栈帧槽位沿用原函数：[ebp-4]=临时按钮对象  [ebp-8]/[ebp-10h]=布局坐标
+//   [ebp-14h]=UI_CreateButton 输出缓冲
+//   退出：jmp 0x4D2963，EAX 必须为 Nordland 按钮对象（原指令的返回值）
+// ===================================================================
+__declspec(naked) void AsgardButtonStub() {
+    __asm {
+        // ---- 重放被 hook 覆盖的指令：创建 Nordland 按钮对象 ----
+        call dword ptr [p_operatorNew]
+        push eax                            // 暂存 Nordland 对象，退出前还原
+
+        // ---- 创建 Asgard 按钮对象 ----
+        push kBtnObjSize
+        call dword ptr [p_operatorNew]
+        pop  ecx                            // 清 cdecl 参数（同原 0x4D2965）
+        mov  [ebp-4], eax
+        cmp  eax, ebx
+        jz   L_newFailed
+
+        // ---- 取两条 saga 文本并创建按钮 ----
+        lea  eax, [esi+216Ch]
+        push eax
+        push kAsgardCtlId
+        push kTextHint
+        call dword ptr [p_getSagaText]
+        pop  ecx
+        push eax
+        push kTextName
+        call dword ptr [p_getSagaText]
+        pop  ecx
+        mov  ecx, [ebp-4]
+        push eax
+        lea  eax, [ebp-14h]
+        push eax
+        call dword ptr [p_createButton]
+        mov  [ebp-4], eax
+        jmp  L_attach
+
+    L_newFailed:
+        mov  [ebp-4], ebx
+
+    L_attach:
+        // ---- 挂进界面并注册 ----
+        push dword ptr [ebp-4]
+        mov  ecx, edi
+        call dword ptr [p_sub439B9C]
+        mov  ecx, [p_uiRootSlot]
+        mov  ecx, [ecx]                     // ecx = dword_554F20
+        push 1
+        push dword ptr [ebp-4]
+        call dword ptr [p_uiAddButton]
+
+        // ---- 布局坐标累加（与 Nordland 的 0x4D29B7 同款）----
+        mov  eax, [ebp-10h]
+        mov  ecx, [ebp-8]
+        lea  eax, [eax+ecx+0Ah]
+        mov  [ebp-10h], eax
+
+        pop  eax                            // 还原 Nordland 对象
+        jmp  dword ptr [p_ret]
+    }
 }
 
 static bool VerifyBytes(DWORD base, DWORD off, const uint8_t* exp, size_t n) {
@@ -143,42 +165,34 @@ public:
         }
 
         DWORD base = ver.GetBaseAddress();
-        DWORD caveStart = (DWORD)cfg.GetInt(kName, "CodeCaveStart", 0xF22CB);
 
-        // 组装 cave（动态填 8 个 rel32）
-        uint8_t buf[sizeof(kCave)];
-        memcpy(buf, kCave, sizeof(kCave));
-        // FillRel 的 off 必须与 kCave 数组的实际字节位置一致（见数组注释）
-        FillRel(buf, 0,   base, caveStart + 0,    F_New);
-        FillRel(buf, 8,   base, caveStart + 8,    F_New);
-        FillRel(buf, 35,  base, caveStart + 35,   F_GetSagaTxt);
-        FillRel(buf, 44,  base, caveStart + 44,   F_GetSagaTxt);
-        FillRel(buf, 58,  base, caveStart + 58,   F_CreateBtn);
-        FillRel(buf, 76,  base, caveStart + 76,   F_Sub439B9C);
-        FillRel(buf, 92,  base, caveStart + 92,   F_AddBtn);
-        FillRel(buf, 111, base, caveStart + 111,  RET);
+        // 1) 绑定 stub 内所有间接跳转目标
+        p_operatorNew  = (void*)(base + F_New);
+        p_getSagaText  = (void*)(base + F_GetSagaTxt);
+        p_createButton = (void*)(base + F_CreateBtn);
+        p_sub439B9C    = (void*)(base + F_Sub439B9C);
+        p_uiAddButton  = (void*)(base + F_AddBtn);
+        p_ret          = (void*)(base + RET);
+        p_uiRootSlot   = (void*)(base + D_UiRoot);
 
-        if (!Patch::WriteBytes(base + caveStart, buf, sizeof(buf))) {
-            LOG_ERROR(kCat, "cave write failed @0x%X", caveStart);
-            return false;
-        }
-
-        // hook 0x4D295E：E9 rel32 -> cave
+        // 2) hook 0x4D295E：原 5 字节 call operator new -> E9 跳向本 DLL 的 stub
         static const uint8_t hookVerify[] = { 0xE8, 0x5A, 0x2C, 0x01, 0x00 };
         if (!VerifyBytes(base, HOOK, hookVerify, sizeof(hookVerify))) {
             LOG_WARN(kCat, "hook verify mismatch @0x%X (already patched?)", base + HOOK);
             return false;
         }
+
+        DWORD stub = (DWORD)(void*)&AsgardButtonStub;
+        int32_t rel = (int32_t)(stub - (base + HOOK + 5));
         uint8_t jmp[5] = { 0xE9, 0, 0, 0, 0 };
-        int32_t rel = (int32_t)((base + caveStart) - (base + HOOK + 5));
         memcpy(&jmp[1], &rel, 4);
         if (!Patch::WriteBytes(base + HOOK, jmp, 5)) {
             LOG_ERROR(kCat, "hook write failed @0x%X", base + HOOK);
             return false;
         }
 
-        LOG_INFO(kCat, "Asgard button injected (cave@0x%X, text saga 25/26, ctl 0x1397)",
-                 caveStart);
+        LOG_INFO(kCat, "Asgard button injected (stub@0x%X, rel=%d, text saga 25/26, ctl 0x1397)",
+                 stub, rel);
         return true;
     }
 };
