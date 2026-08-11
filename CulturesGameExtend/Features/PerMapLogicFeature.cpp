@@ -253,7 +253,8 @@ static void ReloadGoodTypesSafe(DWORD b) {
 // 采集空）。v2.5 入口触发失败的根因是 12 表全重载的文件层扰动；这里只重载
 // goodtypes（1 次 IniFile_Open + 影子表），风险已消除。
 static bool g_entryHook = false;   // 入口 hook 是否装成功（收尾点据此跳过 goodtypes）
-static bool g_goodAtEntryOverridden = false; // 入口是否真重载了 goodtypes（计入 overridden）
+static bool g_goodAtEntryLoaded = false;   // goodtypes 在入口是否已处理（计入 loaders）
+static bool g_goodAtEntryOverridden = false; // 入口是否真用了地图覆盖（计入 overridden）
 static void ReloadGoodTypesAtEntry() {
     if (!g_installed || !g_entryHook) return;
     DWORD b = (DWORD)gameapi::g_imageBase;
@@ -266,15 +267,23 @@ static void ReloadGoodTypesAtEntry() {
         sprintf(dir, "%s\\logic", g_mapSrcStr);
         g_mapHasLogic = (GetFileAttributesA(dir) != INVALID_FILE_ATTRIBUTES);
     }
-    if (!g_mapHasLogic || !g_mapSrcStr[0]) return;
-    if (!GoodTypesOverrideDiffers()) {
-        return;
+    // 无论本图有无 logic 目录，goodtypes 都必须在入口处理一次：
+    //   - 有覆盖且不同于全局 -> 读 MAP <src>\logic（重载）
+    //   - 有覆盖但等于全局 / 无覆盖 -> 读 GLOBAL data\logic（重载，清掉上一图的脏数据）
+    // 否则上一图改过的 goodtypes 会残留在表里、污染下一图（用户实测隐患）。
+    g_goodAtEntryLoaded = true;
+    g_goodAtEntryOverridden = false;   // 防上一图串味
+    if (g_mapHasLogic && GoodTypesOverrideDiffers()) {
+        g_redirect = 1;          // IniFile_Open 改写：loader 读地图包 logic\goodtypes.ini
+        ReloadGoodTypesSafe(b);
+        g_redirect = 0;
+        g_goodAtEntryOverridden = true;
+        LOG_INFO(kCat, "  goodtypes.ini -> MAP <src>\\logic (reloaded at map entry, pre-StaticObjects)");
+    } else {
+        // 无覆盖或覆盖与全局相同：用全局 ini 重载，确保表回到本图应有的状态
+        ReloadGoodTypesSafe(b);
+        LOG_INFO(kCat, "  goodtypes.ini -> GLOBAL data\\logic (reloaded at map entry, pre-StaticObjects)");
     }
-    g_redirect = 1;          // IniFile_Open 改写：loader 读地图包 logic\goodtypes.ini
-    ReloadGoodTypesSafe(b);
-    g_redirect = 0;
-    g_goodAtEntryOverridden = true;   // 计入 overridden（对应 loaders 中也算一次）
-    LOG_INFO(kCat, "  goodtypes.ini -> reloaded at map entry (pre-StaticObjects)");
 }
 
 // ---- 拷回表（指针身份保持）：重载后把新内容拷回原表地址、恢复原指针 ----
@@ -380,11 +389,10 @@ static void ReloadLogicForMap() {
             LOG_INFO(kCat, "  %-42s -> SKIPPED (switch off)", kLogicFiles[i].logical);
             continue;
         }
-        if (i == 2) { // goodtypes：已在入口（0x40A6F4）重载（v3.5），收尾点跳过；入口失败时兜底 shadow-safe
+        if (i == 2) { // goodtypes：已在入口（0x40A6F4）重载，收尾点跳过；入口失败时兜底 shadow-safe
             if (g_entryHook) {
-                LOG_INFO(kCat, "  %-42s -> HANDLED at map entry (pre-StaticObjects)",
-                         kLogicFiles[i].logical);
-                if (g_goodAtEntryOverridden) ++over;   // 入口已真重载 -> 计入 overridden
+                ++ok;                                 // 入口已处理 -> 计入 loaders
+                if (g_goodAtEntryOverridden) ++over; // 入口真用了覆盖 -> 计入 overridden
                 continue;
             }
             if (!GoodTypesOverrideDiffers()) {
