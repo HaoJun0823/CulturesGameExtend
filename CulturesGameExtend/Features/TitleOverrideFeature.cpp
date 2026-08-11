@@ -30,6 +30,10 @@
 #include "Core/GameApi.h"
 #include <Windows.h>
 
+#ifndef CGE_VERSION_STR
+#define CGE_VERSION_STR "0.0.0"     // 构建脚本未注入时的兜底
+#endif
+
 namespace fe_title {
 
 const char* kName = "TitleOverride";
@@ -42,7 +46,7 @@ constexpr uintptr_t R_IatSendMessageA    = 0xF31B8;
 // ---- 运行时状态 ----
 static HWND     g_mainHwnd = nullptr;   // 记录到的主窗口（仅日志）
 static LONG     g_logOnce  = 0;         // 调试日志只打一次
-static wchar_t  g_title[128] = L"";     // 配置标题（UTF-16）
+static wchar_t  g_title[256] = L"";     // 完整标题：配置 Title + 追加 DLL 信息
 
 static decltype(&CreateWindowExA) pRealCreateWindowExA = nullptr;
 static decltype(&SendMessageA)    pRealSendMessageA    = nullptr;
@@ -150,13 +154,22 @@ public:
             return true;
         }
 
-        // UTF-8 -> UTF-16（宽字符标题，中文安全）
-        int n = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, g_title,
-                                    (int)(sizeof(g_title) / sizeof(wchar_t)));
+        // 配置标题（UTF-8 -> UTF-16）
+        wchar_t base[128];
+        int n = MultiByteToWideChar(CP_UTF8, 0, title.c_str(), -1, base,
+                                    (int)(sizeof(base) / sizeof(wchar_t)));
         if (n <= 0) {
             LOG_ERROR(kCat, "invalid UTF-8 Title, override inactive");
             return false;
         }
+
+        // 完整标题 = 配置 Title + 追加 DLL 信息（硬编码，不受 ini 控制）：
+        //   <配置标题>  CulturesGameExtend v<版本> (Build <构建日期> <构建时间>)
+        wchar_t verW[32], dateW[48];
+        MultiByteToWideChar(CP_UTF8, 0, CGE_VERSION_STR, -1, verW, 32);
+        MultiByteToWideChar(CP_UTF8, 0, __DATE__, -1, dateW, 48);
+        swprintf_s(g_title, 256, L"%ls  CulturesGameExtend v%ls (Build %ls %hs)",
+                   base, verW, dateW, __TIME__);
 
         // 备份原 IAT 值并接管（IAT hook：只改导入表槽，不动导出函数入口）
         if (!Patch::ReadMemory(b + R_IatCreateWindowExA, &pRealCreateWindowExA, 4) ||
