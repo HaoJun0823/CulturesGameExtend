@@ -1,6 +1,6 @@
 // AsgardCampaignFeature.cpp
 // ===================================================================
-// [AsgardCampaign]
+// [Cultures2Campaign]   (合并原 AsgardCampaign 入口按钮 + Cultures2Campaign 战役屏加载)
 // 在主菜单"单人游戏"界面（MainMenuUI_Build case 3）的"北国风云(Nordland)"
 // 按钮之上，插入"文化II：阿斯加德之门"战役入口按钮。
 //
@@ -28,10 +28,10 @@
 // 这正是「点了跳到别处」的根因；现改由 Cultures2CampaignFeature 接管 5006
 // 跳表项，本按钮只负责「画在单人游戏界面上」这一件事。
 //
-// 配置（plugins/config/CulturesGameExtend_Game.ini）：
-//   [AsgardCampaign]
+// 配置（plugins/config/CulturesGameExtend_Game.ini，与 Cultures2Campaign 共用同一 section）：
+//   [Cultures2Campaign]
 //   Enabled = 1
-//   ; AddButton = 1   （是否插入按钮；0=禁用插入）
+//   AddButton = 1   （是否插入按钮；0=禁用插入）
 // ===================================================================
 #include "pch.h"
 #include "Core/Feature.h"
@@ -44,8 +44,8 @@
 
 namespace fe_asgard {
 
-const char* kName = "AsgardCampaign";
-const char* kCat  = "[AsgardCampaign]";
+const char* kName = "Cultures2Campaign";
+const char* kCat  = "[Cultures2Campaign]";
 
 // ---- hook 点（RVA = VA - 0x400000；gameapi::Va 约定）----
 constexpr uintptr_t HOOK = 0xD295E;  // VA 0x4D295E：call operator new（Nordland 按钮对象）
