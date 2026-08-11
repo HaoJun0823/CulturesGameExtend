@@ -227,7 +227,7 @@ static void ReloadGoodTypesSafe(DWORD b) {
 
     // 自校验：对比重载前后整表。理想结果 = 只有 ini 里真正改过的字段有差异。
     //   若出现别的偏移变成 0/-1，说明还有运行期回填字段被 memcpy 清掉（继续修）。
-    if (haveSnap && orig && g_dbg) {
+    if (haveSnap && orig) {
         const unsigned char* A = g_goodSnap;
         const unsigned char* B = (const unsigned char*)orig;
         int nd = 0; char det[220]; det[0] = 0; int used = 0;
@@ -236,13 +236,14 @@ static void ReloadGoodTypesSafe(DWORD b) {
             unsigned int y = *(const unsigned int*)(B + off);
             if (x == y) continue;
             ++nd;
-            if (used < 5) {
+            if (g_dbg && used < 5) {
                 char one[48];
                 sprintf(one, " g%d+%d:%d->%d", off / 208, off % 208, (int)x, (int)y);
                 if (strlen(det) + strlen(one) < sizeof(det) - 1) { strcat(det, one); ++used; }
             }
         }
-        LOG_INFO(kCat, "  [diff] dwords changed vs pre-reload = %d;%s", nd, det[0] ? det : " (none)");
+        LOG_INFO(kCat, "  [diff] dwords changed vs pre-reload = %d%s", nd,
+                 (g_dbg && det[0]) ? det : " (should equal count of edited fields)");
     }
 }
 
@@ -252,6 +253,7 @@ static void ReloadGoodTypesSafe(DWORD b) {
 // 采集空）。v2.5 入口触发失败的根因是 12 表全重载的文件层扰动；这里只重载
 // goodtypes（1 次 IniFile_Open + 影子表），风险已消除。
 static bool g_entryHook = false;   // 入口 hook 是否装成功（收尾点据此跳过 goodtypes）
+static bool g_goodAtEntryOverridden = false; // 入口是否真重载了 goodtypes（计入 overridden）
 static void ReloadGoodTypesAtEntry() {
     if (!g_installed || !g_entryHook) return;
     DWORD b = (DWORD)gameapi::g_imageBase;
@@ -266,13 +268,13 @@ static void ReloadGoodTypesAtEntry() {
     }
     if (!g_mapHasLogic || !g_mapSrcStr[0]) return;
     if (!GoodTypesOverrideDiffers()) {
-        LOG_INFO(kCat, "  goodtypes at entry: override absent/identical, skip");
         return;
     }
     g_redirect = 1;          // IniFile_Open 改写：loader 读地图包 logic\goodtypes.ini
     ReloadGoodTypesSafe(b);
     g_redirect = 0;
-    LOG_INFO(kCat, "  goodtypes reloaded at map entry (pre-StaticObjects)");
+    g_goodAtEntryOverridden = true;   // 计入 overridden（对应 loaders 中也算一次）
+    LOG_INFO(kCat, "  goodtypes.ini -> reloaded at map entry (pre-StaticObjects)");
 }
 
 // ---- 拷回表（指针身份保持）：重载后把新内容拷回原表地址、恢复原指针 ----
@@ -292,23 +294,6 @@ static const TableEntry kTables[] = {
 };
 static void* g_origTables[10] = { nullptr };    // 启动时原表指针
 static bool  g_snapshotted = false;
-
-// 全表完整性诊断：打印各表槽1名字（大小恒定表）
-static void LogTablesIntegrity(DWORD b, const char* tag) {
-    if (!g_dbg) return;
-    const char* names[] = { "landscape", "triangle", "good", "house", "vehicle",
-                            "job", "armor", "animal", "humanjobexp" };
-    const int offs[] = { 156, 48, 208, 1572, 476, 136, 52, 64, 52 };
-    const uintptr_t glbs[] = { 0x511528, 0x5114C0, 0x511420, 0x5113A0, 0x511310,
-                               0x511180, 0x510FD8, 0x510F2C, 0x510C18 };
-    for (int i = 0; i < 9; ++i) {
-        void* p = *(void**)(b + (glbs[i] - 0x400000));
-        if (!p) { LOG_INFO(kCat, "  [%s] %-11s table=NULL", tag, names[i]); continue; }
-        const char* s = (const char*)p + offs[i];
-        LOG_INFO(kCat, "  [%s] %-11s slot1='%.14s'", tag, names[i],
-                 *(char*)s ? s : "(empty)");
-    }
-}
 
 // 重载后：把新表内容拷回原表地址 + 恢复原指针（指针身份永不变）
 static void CopyBackTables(DWORD b) {
@@ -350,11 +335,8 @@ static const char* __cdecl PathRewrite(const char* path) {
     for (int i = 0; i < 12; ++i) {
         if (_stricmp(path, g_canonical[i]) != 0) continue;
         sprintf(g_candidate, "%s\\logic\\%s", g_mapSrcStr, kLogicFiles[i].logical);
-        if (GetFileAttributesA(g_candidate) != INVALID_FILE_ATTRIBUTES) {
-            if (g_dbg) LOG_INFO(kCat, "  [rewrite] %s -> MAP %s", path, g_candidate);
+        if (GetFileAttributesA(g_candidate) != INVALID_FILE_ATTRIBUTES)
             return g_candidate;
-        }
-        if (g_dbg) LOG_INFO(kCat, "  [rewrite] %s -> GLOBAL (no map override)", path);
         return path; // 该表缺失 -> 全局
     }
     return path;
@@ -385,20 +367,7 @@ static void ReloadLogicForMap() {
         LOG_INFO(kCat, "[snapshot] original table pointers captured (%d tables)", 10);
     }
 
-    // ---- 诊断（v2.4）：CWD + 直接打开测试 + 全表完整性 ----
-    char cwd[MAX_PATH];
-    GetCurrentDirectoryA(sizeof(cwd), cwd);
-    LOG_INFO(kCat, "[diag] map=%s cwd=%s hasLogic=%d", ident, cwd, (int)g_mapHasLogic);
-    LogTablesIntegrity(b, "before");
-    if (g_mapHasLogic) {
-        char iniBuf[0x1890];
-        gameapi::IniFile_Open((void*)iniBuf, "data\\logic\\goodtypes.ini", 0, 0, 0, 0);
-        LOG_INFO(kCat, "[diag] direct open data\\logic\\goodtypes.ini flag=%u",
-                 (unsigned)((unsigned char)iniBuf[0]));
-        gameapi::IniFile_Close((void*)iniBuf);
-    }
-
-    // 关键：无 logic 目录 -> 绝不重跑（主菜单 demo 图/无覆盖图完全不碰表）
+    // ---- 诊断：无 logic 目录 -> 绝不重跑（主菜单 demo 图/无覆盖图完全不碰表）
     if (!g_mapHasLogic) {
         LOG_INFO(kCat, "map has no logic folder, tables untouched (map=%s)", ident);
         return;
@@ -413,7 +382,9 @@ static void ReloadLogicForMap() {
         }
         if (i == 2) { // goodtypes：已在入口（0x40A6F4）重载（v3.5），收尾点跳过；入口失败时兜底 shadow-safe
             if (g_entryHook) {
-                LOG_INFO(kCat, "  %-42s -> HANDLED at map entry (pre-StaticObjects)", kLogicFiles[i].logical);
+                LOG_INFO(kCat, "  %-42s -> HANDLED at map entry (pre-StaticObjects)",
+                         kLogicFiles[i].logical);
+                if (g_goodAtEntryOverridden) ++over;   // 入口已真重载 -> 计入 overridden
                 continue;
             }
             if (!GoodTypesOverrideDiffers()) {
@@ -451,41 +422,8 @@ static void ReloadLogicForMap() {
 
     // 拷回：新内容写回原表地址、恢复原指针（缓存指针的子系统不会失效）
     CopyBackTables(b);
-    LogTablesIntegrity(b, "after");
     LOG_INFO(kCat, "logic reloaded: map=%s loaders=%d/12 overridden=%d/12 (tables copied back to original addresses)",
              ident, ok, over);
-
-    // ---- 自动取证（Debug=1）：重载后现场 dump ----
-    if (g_dbg) {
-        // 12 表指针（确认拷回后 = 原地址）
-        for (int i = 0; i < 10; ++i) {
-            void* p = *(void**)(b + (kTables[i].globVa - 0x400000));
-            LOG_INFO(kCat, "  [ptrs] tbl[%d] @0x%X = 0x%X (orig 0x%X)",
-                     i, (unsigned)kTables[i].globVa, (unsigned)p, (unsigned)g_origTables[i]);
-        }
-        // goodtypes 全 65 槽完整性
-        void* gt = *(void**)(b + (0x511420 - 0x400000));
-        int empty = 0, zeroLand = 0;
-        if (gt) {
-            for (int i = 1; i < 66; ++i) {
-                const char* nm = (const char*)gt + i * 208;
-                int lt = *(int*)((char*)gt + i * 208 + 32);
-                if (!*nm) ++empty;
-                if (!lt) ++zeroLand;
-            }
-            LOG_INFO(kCat, "  [dump] goodtypes=0x%X emptyName=%d zeroLandscape=%d",
-                     (unsigned)gt, empty, zeroLand);
-            for (int i = 1; i <= 8; ++i)
-                LOG_INFO(kCat, "    g[%d]='%.20s' land=%d",
-                         i, (const char*)gt + i * 208, *(int*)((char*)gt + i * 208 + 32));
-        }
-        // 魔法表占用
-        int used = 0;
-        for (int i = 0; i < 64; ++i) {
-            if (*(unsigned char*)(b + (0x50F930 - 0x400000) + 528 * i)) ++used;
-        }
-        LOG_INFO(kCat, "  [dump] magic table used=%d/64", used);
-    }
 }
 
 // ===================================================================
@@ -582,10 +520,6 @@ public:
             if (g_reload[i]) ++on;
         }
         LOG_INFO(kCat, "per-table reload switches: %d/12 on", on);
-        if (g_dbg)
-            for (int i = 0; i < 12; ++i)
-                LOG_INFO(kCat, "  %-28s = %s", kReloadKeys[i],
-                         g_reload[i] ? "ON" : "off");
 
         // 0) 校验：0x40AA13 应为 call（E8）；IniFile_Open 开头应为标准序言
         const uint8_t kCallOp = 0xE8;
