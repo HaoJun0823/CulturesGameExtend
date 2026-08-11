@@ -26,6 +26,7 @@ void FeatureRegistry::Register(Feature* f) {
 
 size_t FeatureManager::InstallAll(IniConfig& cfg, GameVersion& ver) {
     size_t ok = 0;
+    size_t attempted = 0;   // 分母：只算实际尝试安装的（排除 disabled / target 不匹配）
     for (Feature* f : FeatureRegistry::Instance().All()) {
         const char* name = f->GetName();
         bool enabled = cfg.GetBool(name, "Enabled", false);
@@ -39,6 +40,7 @@ size_t FeatureManager::InstallAll(IniConfig& cfg, GameVersion& ver) {
                      name, GameTargetName(f->GetTarget()), GameTargetName(ver.Current()));
             continue;
         }
+        ++attempted;
         LOG_INFO(kCategory, "Installing Feature '%s' ...", name);
         if (f->OnInstall(cfg, ver)) {
             ++ok;
@@ -47,8 +49,9 @@ size_t FeatureManager::InstallAll(IniConfig& cfg, GameVersion& ver) {
             LOG_ERROR(kCategory, "Feature '%s' install FAILED.", name);
         }
     }
-    LOG_INFO(kCategory, "Installed %zu/%zu features.", ok,
-             FeatureRegistry::Instance().All().size());
+    LOG_INFO(kCategory, "Installed %zu/%zu features (%zu registered, %zu disabled/target-mismatch).",
+             ok, attempted, FeatureRegistry::Instance().All().size(),
+             FeatureRegistry::Instance().All().size() - attempted);
     return ok;
 }
 
