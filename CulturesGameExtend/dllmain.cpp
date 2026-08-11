@@ -16,6 +16,7 @@
 #include "Features/UnlockAllCampaignsFeature.cpp"
 #include "Features/CampaignMovieFeature.cpp"
 #include "Features/VersionStampFeature.cpp"
+#include "Features/TitleOverrideFeature.cpp"
 
 namespace {
 
