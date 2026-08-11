@@ -17,6 +17,7 @@
 #include "Features/CampaignMovieFeature.cpp"
 #include "Features/VersionStampFeature.cpp"
 #include "Features/TitleOverrideFeature.cpp"
+#include "Features/PerMapLogicFeature.cpp"
 
 namespace {
 
