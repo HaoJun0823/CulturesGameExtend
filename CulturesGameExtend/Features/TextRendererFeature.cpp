@@ -87,6 +87,8 @@ static bool         g_hookOn   = false;
 static uint32_t     g_textColor  = 0xFFFFFF;
 static int          g_textYOffset = 0;
 static int          g_textXOffset = 0;   // 2026-08-12 新增：水平微调（修"整体右偏"）
+static bool         g_antiAlias = true;  // 抗锯齿开关（1=灰度抗锯齿；0=硬边清晰）
+static int          g_halfCellExtra = 1; // 半角格加宽（西文间距偏近 → +N px）
 static uintptr_t    g_base = 0;
 
 // UTF-8 重组缓冲（文本绘制单线程顺序进行，足够）
@@ -194,10 +196,10 @@ static void EnsureFont(uintptr_t base) {
     g_raster.Reset();
     bool ok = false;
     if (!filePath.empty())
-        ok = g_raster.CreateFromFile(filePath.c_str(), g_fontSize, 400, false);
+        ok = g_raster.CreateFromFile(filePath.c_str(), g_fontSize, 400, false, g_antiAlias);
     if (!ok)
-        ok = g_raster.Create(faceName.c_str(), g_fontSize, 400, false);
-    if (ok) { g_ready = true; LOG_INFO(kCat, "engine ready: font key=%ls size=%d", wantKey.c_str(), g_fontSize); }
+        ok = g_raster.Create(faceName.c_str(), g_fontSize, 400, false, g_antiAlias);
+    if (ok) { g_ready = true; LOG_INFO(kCat, "engine ready: font key=%ls size=%d aa=%d", wantKey.c_str(), g_fontSize, g_antiAlias ? 1 : 0); }
     else    { g_ready = false; LOG_ERROR(kCat, "failed to create font: %ls", wantKey.c_str()); }
 }
 
@@ -281,7 +283,7 @@ static uintptr_t g_thunkWidth = 0;   // sub_439633 跳板
 //   Tooltip 画多 pass 时各 pass 颜色不同（阴影/描边深色 + 主体白色），旧代码统一用
 //   g_textColor(白) → 两遍白色叠加 → 残留重影。改用引擎颜色 → 还原原版颜色/阴影，重影消失。
 static bool g_useEngineColor = true;
-static bool g_wordSplitPatch = true;   // LG4/LG0 同款分词补丁（引擎按单字符分词，CJK 布局根源）
+static bool g_wordSplitPatch = false;  // ★弃用（10:41）：导致长文本 justify 分散对齐；默认关，保留应急
 static bool g_blendIdempotent = true;  // BlitGlyph 像素级幂等（防不清空表面跨帧累积）
 static uint32_t EngineColor(const uint8_t* c) {
     if (!c || !g_useEngineColor) return g_textColor;
@@ -491,7 +493,7 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
     //   TextXOffset 仅作微调（默认 0）。
     static const int kBearingX = 3;
     FbState* st = FindFbState(fb);
-    int slotW = IsWideCodepoint(cp) ? cellW : (cellW / 2);
+    int slotW = IsWideCodepoint(cp) ? cellW : (cellW / 2 + g_halfCellExtra);  // ★半格+Extra
     int dx, dy;
     if (st->mode == 1) {
         int lh = lineH; if (lh < g->h) lh = g->h;
@@ -562,11 +564,11 @@ static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx,
 static int OnGlyphWidth(int /*font*/, int ch) {
     if (!g_ready) return -1;
     if (ch < 0x80) {
-        // ASCII / 空格：半格（LG: v19==32 -> a5 += 格宽>>1；其他 ASCII 同半格）
-        return g_fontSize / 2;
+        // ASCII / 空格：半格 + HalfCellExtra（★10:3x 西文间距偏近 → 加宽）
+        return g_fontSize / 2 + g_halfCellExtra;
     }
     if ((ch & 0xC0) == 0x80) return 0;      // continuation：不前进
-    if (ch < 0xE0) return g_fontSize / 2;   // 2 字节 lead（Latin/希腊/西里尔等）：半格
+    if (ch < 0xE0) return g_fontSize / 2 + g_halfCellExtra;  // 2 字节 lead（Latin 等）：半格
     return g_fontSize;                      // 3/4 字节 lead（CJK/全角）：全格
 }
 
@@ -635,6 +637,204 @@ extern "C" void __declspec(naked) GlyphWidthStub() {
     }
 }
 
+// ===================================================================
+// ★ 2026-08-12 11:0x sub_4E21B7 词收集循环 CJK 单码点 hook
+//   问题：引擎换行排版（sub_4E21B7）按空格收集"词"；中文无空格 → 整段一个超长词
+//   → 超宽换行时整段换行、x 重置到起始（a2）→ "下一行从屏幕最左边出来"（用户实测）。
+//   修复：hook 词收集循环 0x4E2242（cmp cl,7Bh = 80 F9 7B 74 0C），
+//   CJK 字节（≥0x80）按 **整个码点**（lead+continuation）收集为一个"词"→
+//   引擎按码点换行（词宽=全格），中文排版正常；不动 sub_4CFE93（简报 justify 不受影响）。
+//   寄存器契约（收集循环内）：eax=缓冲索引, edx=String1(当前字节), cl=当前字节。
+//   byte_569A38 = 词缓冲（绝对地址）。edi 用作临时（0x4E226A mov edi,eax 会覆盖，安全）。
+//   尾部 add edx,1 补偿引擎 0x4E225D 的 dec edx（我们已消费整个码点）。
+// ===================================================================
+static uintptr_t g_thunkWordCol = 0;  // 0x4E2242 跳板（原 5 字节）
+
+extern "C" void __declspec(naked) WordColStub() {
+    __asm {
+        // 入口：eax=索引, edx=String1, cl=当前字节
+        cmp  cl, 0x80
+        jb   L_ascii            // ASCII → 原逻辑（trampoline）
+        // CJK：整体收集码点
+        mov  edi, eax
+        mov  [edi+0x569A38], cl
+        inc  edi
+        // cont1
+        mov  cl, [edx]
+        and  cl, 0xC0
+        cmp  cl, 0x80
+        jne  L_done
+        mov  cl, [edx]
+        inc  edx
+        mov  [edi+0x569A38], cl
+        inc  edi
+        // cont2
+        mov  cl, [edx]
+        and  cl, 0xC0
+        cmp  cl, 0x80
+        jne  L_done
+        mov  cl, [edx]
+        inc  edx
+        mov  [edi+0x569A38], cl
+        inc  edi
+        // cont3（4 字节码点）
+        mov  cl, [edx]
+        and  cl, 0xC0
+        cmp  cl, 0x80
+        jne  L_done
+        mov  cl, [edx]
+        inc  edx
+        mov  [edi+0x569A38], cl
+        inc  edi
+    L_done:
+        mov  byte ptr [edi+0x569A38], 0   // 结束符（= 0x4E2253 的 and）
+        mov  eax, edi
+        add  edx, 1                       // 补偿 0x4E225D dec edx（已消费整个码点）
+        mov  eax, 4E225Ah                 // 跳过 0x4E2253 直接测宽（MSVC 内联 asm 不支持 jmp 立即数）
+        jmp  eax
+    L_ascii:
+        jmp  g_thunkWordCol
+    }
+}
+
+// ===================================================================
+// ★ 2026-08-12 11:4x 超宽词字符级折行（hook 0x4E2267 测宽后，LG4 同款点）
+//   问题（用户实测 11:36）：动态容器内文本渲染异常——
+//   ① 过长文本（无空格长词：IP 地址/长英文）超宽时引擎**整词换行**到 x=起始(4)
+//      → 溢出屏幕左侧 / 超出容器不显示；
+//   ② 换行排版按空格分词，中文无空格 → 整段 1 超长词 → 无法按容器折行。
+//   诊断（LayDiag/LayMeas 11:41）：xStart=4、行宽=346、词宽=23×6 连续词。
+//   修复：测宽后（0x4E2267，edi=词宽前）检查"词宽+当前x >= 行宽"（超宽）：
+//     → 把词缓冲 byte_569A38 截断为**第一个完整字符**（ASCII 1B / UTF-8 码点），
+//       新词宽 = 单字符宽（不超宽 → 引擎正常绘制）；
+//     → String1([ebp+0x20]) 回退到第二个字符 → 外层循环继续收集剩余 → 逐字符排版。
+//   效果：长词按字符折行（像 LG4 单字符分词，但只在超宽时触发 → 英文单词正常
+//   整词换行不受影响，briefings justify 也不受影响）。
+// ===================================================================
+static int FixOverflowWord(char* buf, int curX, int lineW, char** strPtr, int wordW) {
+    if (wordW <= 0 || !buf || !strPtr || !*strPtr) return wordW;
+    if (curX + wordW < lineW) return wordW;      // 未超宽：不干预
+    int L = (int)strlen(buf);
+    if (L <= 1) return wordW;                    // 单字符词（已最小）
+    uint8_t b0 = (uint8_t)buf[0];
+    int c1 = 1;
+    if (b0 >= 0x80) {                            // UTF-8 lead：取完整码点
+        c1 = (b0 >= 0xF0) ? 4 : (b0 >= 0xE0) ? 3 : 2;
+        while (c1 > 1 && c1 <= L && ((uint8_t)buf[c1-1] & 0xC0) != 0x80) c1--;
+    }
+    if (c1 >= L) return wordW;                   // 整词就一个字符
+    buf[c1] = 0;                                 // 截断词缓冲为首字符
+    int nw = (b0 < 0xE0) ? (g_fontSize / 2 + g_halfCellExtra) : g_fontSize;
+    if (nw <= 0) nw = 1;
+    *strPtr = *strPtr - (L - c1);                // String1 回退到第二个字符
+    return nw;
+}
+
+// ★ 容器左修复：sub_4E21B7 的 x 起始(a2) 引擎硬编码=4（屏幕左），动态容器内文本整体错位左侧。
+//   布局上下文(a1)+0x40 = 容器右边界；行宽(a4) = 容器宽；容器左 = +0x40 - 行宽。
+//   （实测 IP 场景：+0x40=440, 行宽=346 → 容器左=94。全屏表面 +0x40=0 → 不启用保持原值。）
+//   ★ 11:57 用户反馈"缩进很多" → 改配置控制（ContainerLeftFix，默认 0=关，先修换行）。
+static int g_containerLeftFix = 0;   // 配置 ContainerLeftFix
+
+static int FixLayoutXStart(void* ctx, int lineW, int origX) {
+    if (!g_containerLeftFix) return origX;   // 默认关闭（11:57 用户反馈缩进过头）
+    if (!ctx) return origX;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (VirtualQuery(ctx, &mbi, sizeof(mbi)) == 0) return origX;
+    if (mbi.State != MEM_COMMIT) return origX;
+    if ((uintptr_t)ctx + 0x44 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) return origX;
+    int right = *(const int*)((uintptr_t)ctx + 0x40);
+    if (right <= 0 || right > 8000) return origX;        // 无容器右/异常 → 保持
+    if (lineW <= 0 || lineW > 8000) return origX;
+    int left = right - lineW;
+    if (left < 0 || left > 8000) return origX;
+    return left;                                          // 容器左
+}
+
+// ★ 换行诊断：记录每个词的排版参数（测宽点）+ 换行事件（0x4E2280）
+static void MeasLog(int curX, int wordW, int lineW) {
+    static int n = 0;
+    if (n >= 24) return;
+    n++;
+    LOG_INFO(kCat, "Meas[%d]: curX=%d wordW=%d lineW=%d -> %s",
+             n, curX, wordW, lineW, (curX + wordW >= lineW) ? "OVERFLOW(换行)" : "ok");
+}
+static void WrapLog(int xBefore, int yBefore) {
+    static int n = 0;
+    if (n >= 12) return;
+    n++;
+    LOG_INFO(kCat, "Wrap[%d]: xBefore=%d yBefore=%d (line break)", n, xBefore, yBefore);
+}
+
+// sub_4E21B7 换行分支 hook（0x4E2280，mov ebx,[ebp+0xC]; mov [ebp-4],eax = 6 字节）
+static uintptr_t g_thunkWrap = 0;
+extern "C" void __declspec(naked) WrapStub() {
+    __asm {
+        pushad
+        mov  eax, [esp + 16]      // pushad 保存的 ebx = 换行前 x
+        push eax                  // xBefore
+        mov  eax, [ebp - 4]       // 换行前 y
+        push eax                  // yBefore
+        call WrapLog
+        add  esp, 8
+        popad
+        jmp  g_thunkWrap          // trampoline：原 6 字节 → 0x4E2286
+    }
+}
+
+// sub_4E21B7 入口 hook（0x4E21C7，mov eax,[ebp+0x10]; push ebx; push esi）
+static uintptr_t g_thunkLayEntry = 0;
+
+extern "C" void __declspec(naked) LayoutEntryStub() {
+    __asm {
+        pushad
+        // FixLayoutXStart(ctx=[ebp+8], lineW=[ebp+14], origX=[ebp+0C])
+        mov  eax, [ebp + 0x0C]
+        push eax                  // origX
+        mov  eax, [ebp + 0x14]
+        push eax                  // lineW
+        mov  eax, [ebp + 0x08]
+        push eax                  // ctx
+        call FixLayoutXStart
+        add  esp, 12
+        mov  [ebp + 0x0C], eax    // 改 a2（x 起始）
+        popad
+        jmp  g_thunkLayEntry      // trampoline：原 5 字节 → 0x4E21CC
+    }
+}
+
+extern "C" void __declspec(naked) OverflowStub() {
+    __asm {
+        pushad
+        // MeasLog(curX=ebx, wordW=原eax, lineW=[ebp+14]) —— 每词排版参数
+        mov  eax, [esp + 28]      // 原 eax = 词宽
+        push eax                  // wordW
+        mov  eax, [ebp + 0x14]
+        push eax                  // lineW
+        push ebx                  // curX
+        call MeasLog
+        add  esp, 12
+        // 参数：FixOverflowWord(buf, curX, lineW, &[ebp+0x20], wordW)
+        mov  eax, [esp + 28]      // 原 eax = 词宽（sub_43967D 返回值）
+        push eax                  // wordW
+        lea  ecx, [ebp + 0x20]    // &String1
+        push ecx                  // &strPtr
+        mov  eax, [ebp + 0x14]    // 行宽
+        push eax                  // lineW
+        push ebx                  // curX（pushad 后 ebx 未动 = 当前 x）
+        push 0x569A38             // 词缓冲（绝对地址）
+        call FixOverflowWord
+        add  esp, 20
+        mov  [esp + 28], eax      // 新词宽 → pushad 保存的 eax
+        popad
+        // 原 5 字节逻辑：mov ecx,[ebp+8]; mov edi,eax（edi = 词宽）
+        mov  ecx, [ebp + 8]
+        mov  edi, eax
+        mov  eax, 4E226Ch         // 跳过已执行部分，回 0x4E226C（超宽判断）
+        jmp  eax
+    }
+}
+
 // 抄 copyLen 原字节 + E9 跳回 entry+copyLen
 static uintptr_t MakeTrampoline(uintptr_t entry, int copyLen) {
     uintptr_t t = (uintptr_t)VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -665,21 +865,59 @@ static void InstallHooks(uintptr_t base) {
     }
     LOG_INFO(kCat, "InstallHooks: hooked glyph chokepoint sub_439610 + width sub_439633 "
                     "(ASCII relays to engine; CJK -> GDI).");
+
+    // ★ 11:0x sub_4E21B7 词收集循环 CJK 单码点 hook（中文按码点换行）
+    uintptr_t eWordCol = base + (0x4E2242 - 0x400000);
+    auto curBytes = Patch::ReadBytes(eWordCol, 5);
+    if (curBytes.size() == 5 && curBytes[0] == 0x80 && curBytes[1] == 0xF9 &&
+        curBytes[2] == 0x7B && curBytes[3] == 0x74) {
+        g_thunkWordCol = MakeTrampoline(eWordCol, 5);
+        if (!g_thunkWordCol) { LOG_ERROR(kCat, "InstallHooks: wordcol trampoline failed"); return; }
+        if (!Patch::WriteJmp(eWordCol, (uintptr_t)&WordColStub)) {
+            LOG_ERROR(kCat, "InstallHooks: WriteJmp failed @0x%X (wordcol)", (unsigned)eWordCol); return;
+        }
+        LOG_INFO(kCat, "InstallHooks: hooked sub_4E21B7 word-collect (CJK single-codepoint word).");
+    } else {
+        LOG_WARN(kCat, "InstallHooks: wordcol bytes mismatch @0x%X (skip)", (unsigned)eWordCol);
+    }
+
+    // ★ 11:5x 容器左修复 hook（sub_4E21B7 入口 0x4E21C7）：
+    //   x 起始(a2) 引擎硬编码 4 → 改为 容器右(+0x40) - 行宽（动态容器内文本不溢出左侧）
+    uintptr_t eLayEntry = base + (0x4E21C7 - 0x400000);
+    auto eb1 = Patch::ReadBytes(eLayEntry, 5);
+    if (eb1.size() == 5 && eb1[0] == 0x8B && eb1[1] == 0x45 && eb1[2] == 0x10 && eb1[3] == 0x53) {
+        g_thunkLayEntry = MakeTrampoline(eLayEntry, 5);
+        if (g_thunkLayEntry && Patch::WriteJmp(eLayEntry, (uintptr_t)&LayoutEntryStub))
+            LOG_INFO(kCat, "InstallHooks: hooked sub_4E21B7 entry (container-left x-fix, %s).",
+                     g_containerLeftFix ? "ON" : "OFF");
+    } else LOG_WARN(kCat, "InstallHooks: layEntry bytes mismatch (skip)");
+
+    // ★ 11:57 换行诊断 hook（sub_4E21B7 换行分支 0x4E2280，6 字节）——记录换行事件
+    uintptr_t eWrap = base + (0x4E2280 - 0x400000);
+    auto ew = Patch::ReadBytes(eWrap, 6);
+    if (ew.size() == 6 && ew[0] == 0x8B && ew[1] == 0x5D && ew[2] == 0x0C && ew[3] == 0x89) {
+        g_thunkWrap = MakeTrampoline(eWrap, 6);
+        if (g_thunkWrap && Patch::WriteJmp(eWrap, (uintptr_t)&WrapStub))
+            LOG_INFO(kCat, "InstallHooks: hooked sub_4E21B7 wrap branch (line-break diag).");
+    } else LOG_WARN(kCat, "InstallHooks: wrap bytes mismatch (skip)");
+
+    // ★ 11:4x 超宽词字符级折行 hook（0x4E2267 测宽后，LG4 同款点）：
+    //   超宽词截断为单字符 + String1 推进 → 引擎逐字符排版（修 IP/长词溢出、不显示）
+    uintptr_t eLayMeas = base + (0x4E2267 - 0x400000);
+    auto eb2 = Patch::ReadBytes(eLayMeas, 5);
+    if (eb2.size() == 5 && eb2[0] == 0x8B && eb2[1] == 0x4D && eb2[2] == 0x08 &&
+        eb2[3] == 0x8B && eb2[4] == 0xF8) {
+        if (Patch::WriteJmp(eLayMeas, (uintptr_t)&OverflowStub))
+            LOG_INFO(kCat, "InstallHooks: hooked sub_4E21B7 measure-after (overflow word-wrap).");
+    } else LOG_WARN(kCat, "InstallHooks: layMeas bytes mismatch (skip)");
 }
 
-// ★ 2026-08-12 09:1x 分词补丁（LG4/LG0 同款思路，★只打补丁①）：
-//   引擎文本处理默认"按空格分词"，中文无空格 → 整段中文被引擎当一个"超长词"→
-//   换行/宽度/Tooltip 框布局计算异常。
-//   ① RVA 0xD053B `jmp short loc_4D0516`(EB D9) → NOP：sub_4CFE93 富文本解析器
-//      词扫描循环单字符化。★已验证安全：NOP 后各路径（普通词/空白/'\n'/标签）
-//      edi 均前进，无死循环。
-//   ★★ ② RVA 0xE2251 `jnz short loc_4E222F`(75 DC) —— **不可用**！
-//      Saga sub_4E21B7 外层循环(0x4E21E3)不自行推进 String1，依赖收集循环
-//      (0x4E222F)消费整词推进；NOP 后只收集 1 字符，0x4E225D `dec edx` 把
-//      String1 拉回当前字符 → 外层无限重读同字符 → **死循环卡死**（选地图界面实测）。
-//      C3CD sub_4DCE33 外层自行推进，故 LG0 在 C3CD 有效；Saga 结构不同不可照搬。
-//      ⇒ 换行排版的中文适配改由 hook sub_43967D 实现（LG4 hook1=0x4396A5 同款）。
-//   写入前校验原字节，防版本不符写坏。
+// ★ 2026-08-12 分词补丁（LG4/LG0 同款思路，只打补丁①）——**已弃用，默认关闭**：
+//   ⚠ 弃用原因（10:41 用户实测）：补丁①(RVA 0xD053B 词扫描单字符化)导致引擎对长段落
+//   （如 briefings.txt 任务简报）的两端对齐(justify)按"词间距"分散时词=1字符 →
+//   每字符均匀分散 = 文本"居中分散对齐"。Tooltip 叠加早已定案为偏移问题（与分词补丁无关）。
+//   保留代码仅作参考/应急；WordSplitPatch 默认 0（不开）。
+//   ★ 补丁②(RVA 0xE2251) 在 Saga 上 NOP 必死循环（sub_4E21B7 外层不自行推进指针），不可用。
 static void InstallWordSplitPatches(uintptr_t base) {
     const uint8_t nops[2] = { 0x90, 0x90 };
     struct Pt { uint32_t rva; uint8_t b0, b1; const char* what; };
@@ -742,7 +980,10 @@ public:
         g_textYOffset  = cfg.GetInt(kName, "TextYOffset", 0);
         g_textXOffset  = cfg.GetInt(kName, "TextXOffset", 0);
         g_useEngineColor = cfg.GetBool(kName, "UseEngineColor", true);
-        g_wordSplitPatch = cfg.GetBool(kName, "WordSplitPatch", true);
+        g_antiAlias      = cfg.GetBool(kName, "AntiAlias", true);
+        g_halfCellExtra  = cfg.GetInt(kName, "HalfCellExtra", 1);
+        g_containerLeftFix = cfg.GetBool(kName, "ContainerLeftFix", false);
+        g_wordSplitPatch = cfg.GetBool(kName, "WordSplitPatch", false);  // 弃用功能，默认关
         g_blendIdempotent = cfg.GetBool(kName, "BlendIdempotent", true);
 
         g_base = ver.GetBaseAddress();
@@ -754,7 +995,7 @@ public:
         if (g_selfTest) RunSelfTest(cfg.GetString(kName, "SelfTestText", ""));
         if (g_hookOn)  InstallHooks(g_base);
         else           LOG_INFO(kCat, "HookEnabled=0: glyph hooks not installed.");
-        if (g_wordSplitPatch) InstallWordSplitPatches(g_base);
+        if (g_wordSplitPatch) InstallWordSplitPatches(g_base);   // 弃用功能，默认关
         return true;
     }
 };

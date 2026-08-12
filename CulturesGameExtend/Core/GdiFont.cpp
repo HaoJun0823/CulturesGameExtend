@@ -101,7 +101,8 @@ std::wstring GdiFontRasterizer::ReadTtfFamilyName(const wchar_t* path) {
     return best;
 }
 
-bool GdiFontRasterizer::CreateFromFile(const wchar_t* filePath, int heightPx, int weight, bool italic) {
+bool GdiFontRasterizer::CreateFromFile(const wchar_t* filePath, int heightPx, int weight, bool italic,
+                                       bool antiAlias) {
     if (m_hdc) return false;
     // FR_PRIVATE：仅本进程可见，不写注册表、不需管理员权限；卸载用 RemoveFontResourceEx。
     m_fontRes = AddFontResourceExW(filePath, FR_PRIVATE, 0);
@@ -112,19 +113,22 @@ bool GdiFontRasterizer::CreateFromFile(const wchar_t* filePath, int heightPx, in
         return false;
     }
     m_fontFile = filePath;
-    bool ok = Create(face.c_str(), heightPx, weight, italic);
+    bool ok = Create(face.c_str(), heightPx, weight, italic, antiAlias);
     if (!ok && m_fontRes) { RemoveFontResourceExW(filePath, FR_PRIVATE, 0); m_fontRes = 0; m_fontFile.clear(); }
     return ok;
 }
 
-bool GdiFontRasterizer::Create(const wchar_t* fontName, int heightPx, int weight, bool italic) {
+bool GdiFontRasterizer::Create(const wchar_t* fontName, int heightPx, int weight, bool italic,
+                               bool antiAlias) {
     if (m_hdc) return false;
     m_hdc = CreateCompatibleDC(nullptr);
     if (!m_hdc) return false;
 
+    // ★ 10:3x 抗锯齿开关：ANTIALIASED=灰度抗锯齿(平滑/发虚)；NONANTIALIASED=硬边(清晰/锯齿)
+    int quality = antiAlias ? ANTIALIASED_QUALITY : NONANTIALIASED_QUALITY;
     m_hfont = CreateFontW(-heightPx, 0, 0, 0, weight, italic ? 1 : 0, 0, 0,
                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                          ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, fontName);
+                          quality, DEFAULT_PITCH | FF_DONTCARE, fontName);
     if (!m_hfont) { DeleteDC(m_hdc); m_hdc = nullptr; return false; }
     SelectObject(m_hdc, m_hfont);
 

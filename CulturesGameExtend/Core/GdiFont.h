@@ -50,12 +50,15 @@ public:
 
     // 用指定字体名 / 像素高度创建光栅器。失败返回 false。
     // fontName 例：L"Microsoft JhengHei"(繁中) / L"Microsoft YaHei"(简中) / L"SimSun"
-    bool Create(const wchar_t* fontName, int heightPx, int weight = 400, bool italic = false);
+    // antiAlias: true=灰度抗锯齿(平滑但可能发虚) / false=硬边(NONANTIALIASED，清晰但锯齿)。
+    bool Create(const wchar_t* fontName, int heightPx, int weight = 400, bool italic = false,
+                bool antiAlias = true);
 
     // 从 .ttf 文件加载字体（自包含，不依赖系统是否安装该字体）。
     // 内部用 AddFontResourceEx(FR_PRIVATE) 把文件注册到本进程，再按文件内的
     // 族名创建。filePath 例：L"plugins/fonts/l10.ttf"。
-    bool CreateFromFile(const wchar_t* filePath, int heightPx, int weight = 400, bool italic = false);
+    bool CreateFromFile(const wchar_t* filePath, int heightPx, int weight = 400, bool italic = false,
+                        bool antiAlias = true);
 
     // 释放当前字体与画布，回到初始态（便于按游戏语言热切换字体）。
     void Reset();
