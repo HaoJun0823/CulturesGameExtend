@@ -78,9 +78,12 @@ public:
     //   dx,dy : 字形黑框左上角在 fb 中的像素位置（调用方应已加 originX/originY 校正）
     //   color : 0xRRGGBB（16bpp 时自动转 RGB565）
     //   fbW,fbH : 目标表面像素宽/高（用于边界裁剪，防止写出缓冲外导致崩溃）
+    //   idempotent : 像素级幂等（1=推荐）：目标像素已≈前景色则跳过该像素，避免
+    //     不清空表面上的跨帧重绘累积（LG4 tga 位图不透明直写无累积，GDI 抗锯齿
+    //     alpha 混合会累积变浓；幂等 = 保留抗锯齿 + 同位置重绘像素不变）。
     static void BlitGlyph(uint8_t* fb, int pitch, int bpp,
                           int dx, int dy, const Glyph* g, uint32_t color,
-                          int fbW, int fbH);
+                          int fbW, int fbH, bool idempotent = true);
 
     // 把 RGBA 缓冲（白底文字）保存为 32bpp BMP（用于独立验证 / 自测落盘）。
     static bool SaveRGBAAsBMP(const char* path, int w, int h, const uint8_t* rgba);

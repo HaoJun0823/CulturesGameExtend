@@ -245,7 +245,7 @@ std::vector<uint32_t> GdiFontRasterizer::DecodeUtf8(const char* s, size_t n) {
 
 void GdiFontRasterizer::BlitGlyph(uint8_t* fb, int pitch, int bpp,
                                   int dx, int dy, const Glyph* g, uint32_t color,
-                                  int fbW, int fbH) {
+                                  int fbW, int fbH, bool idempotent) {
     if (!fb || !g || g->w == 0 || g->h == 0) return;
     if (fbW <= 0 || fbH <= 0) return;
     uint8_t tr = (uint8_t)((color >> 16) & 0xFF);
@@ -262,6 +262,12 @@ void GdiFontRasterizer::BlitGlyph(uint8_t* fb, int pitch, int bpp,
             if (a == 0) continue;
             if (bpp == 2) {
                 uint16_t* p = (uint16_t*)(fb + (size_t)fy * pitch + (size_t)fx * 2);
+                if (idempotent) {
+                    // RGB565 通道容差（5/6/5 位 ≈ 8 位值 24/32/24）
+                    uint8_t r, gg, b; From565(*p, r, gg, b);
+                    int dr = (int)r - tr, dg = (int)gg - tg, db = (int)b - tb;
+                    if (dr > -4 && dr < 4 && dg > -5 && dg < 5 && db > -4 && db < 4) continue;
+                }
                 uint8_t r, gg, b; From565(*p, r, gg, b);
                 r = (uint8_t)(r + ((tr - r) * a) / 255);
                 gg = (uint8_t)(gg + ((tg - gg) * a) / 255);
@@ -269,6 +275,11 @@ void GdiFontRasterizer::BlitGlyph(uint8_t* fb, int pitch, int bpp,
                 *p = To565((uint32_t)((r << 16) | (gg << 8) | b));
             } else if (bpp == 4) {
                 uint8_t* p = fb + (size_t)fy * pitch + (size_t)fx * 4;
+                if (idempotent) {
+                    // 32bpp 通道容差 24：抗锯齿中心墨迹≈纯前景色，重绘直接跳过（防累积）
+                    int dr = (int)p[2] - tr, dg = (int)p[1] - tg, db = (int)p[0] - tb;
+                    if (dr > -24 && dr < 24 && dg > -24 && dg < 24 && db > -24 && db < 24) continue;
+                }
                 p[0] = (uint8_t)(p[0] + ((tb - p[0]) * a) / 255);
                 p[1] = (uint8_t)(p[1] + ((tg - p[1]) * a) / 255);
                 p[2] = (uint8_t)(p[2] + ((tr - p[2]) * a) / 255);

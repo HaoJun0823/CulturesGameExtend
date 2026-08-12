@@ -95,6 +95,7 @@ static int      s_got  = 0;     // 已收到的 continuation 数
 static uint32_t s_cp   = 0;     // 当前码点累加值
 static int      s_lx = 0, s_ly = 0; // lead 字节时的 (x,y)，渲染以此为准
 static const uint8_t* s_color = nullptr; // lead 字节时的引擎颜色上下文（多字节码点跨两次调用）
+static const void*     s_font  = nullptr; // lead 字节时的字体对象（垂直居中行高）
 
 static bool  g_loggedOnce = false;
 
@@ -219,6 +220,8 @@ static uintptr_t g_thunkWidth = 0;   // sub_439633 跳板
 //   Tooltip 画多 pass 时各 pass 颜色不同（阴影/描边深色 + 主体白色），旧代码统一用
 //   g_textColor(白) → 两遍白色叠加 → 残留重影。改用引擎颜色 → 还原原版颜色/阴影，重影消失。
 static bool g_useEngineColor = true;
+static bool g_wordSplitPatch = true;   // LG4/LG0 同款分词补丁（引擎按单字符分词，CJK 布局根源）
+static bool g_blendIdempotent = true;  // BlitGlyph 像素级幂等（防不清空表面跨帧累积）
 static uint32_t EngineColor(const uint8_t* c) {
     if (!c || !g_useEngineColor) return g_textColor;
     return ((uint32_t)c[2] << 16) | ((uint32_t)c[1] << 8) | c[0];
@@ -261,7 +264,19 @@ static bool ShouldSkipRepeat(uint8_t* fb, int pitchBytes, int bpp, int dx, int d
     return false;
 }
 
-static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t* colorCtx) {
+// ★ 09:2x 引擎行高自适应垂直居中：不同 UI 用不同字体对象（sub_439610 的 ecx），
+//   行距 = 字体对象+8 的值 + 2（sub_40ECF9 反编译实锤 `a5 += a2[2] + 2`）。
+//   主界面字体行高≈20 → 居中偏移 (20-13)/2≈3（正是用户手工调出的 TextYOffset=3）；
+//   Tooltip 字体行高紧凑 → 偏移≈0（不再溢出引擎画的方框 → 叠加消失）。
+//   TextYOffset 降级为纯微调（默认 0）。
+static int FontLineHeight(const void* font) {
+    if (!font) return g_fontSize;
+    int lh = *(const int*)((uintptr_t)font + 8) + 2;   // 行距 = font[8] + 2
+    if (lh < 8 || lh > 64) lh = g_fontSize;            // 防御：异常回退
+    return lh;
+}
+
+static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t* colorCtx, const void* font) {
     if (!self || cp <= 0x20) return;
     uint32_t color = EngineColor(colorCtx);
     uintptr_t fb = *(uintptr_t*)((uintptr_t)self + 0x2C);
@@ -278,21 +293,30 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
     int fbH = *(int*)((uintptr_t)self + 0x18);
     if (fbH <= 0 || fbH > 4096) fbH = 600;
     if (fbW <= 0 || fbW > 4096) fbW = 800;
-    if (!g_dumpedDrawCtx) {
-        g_dumpedDrawCtx = true;
-        uint32_t* d = (uint32_t*)self;
-        LOG_INFO(kCat, "RenderCodepoint first: self=%p fb=%p pitch_px=%d clip=(%d,%d %dx%d) "
-                 "fbW=%d fbH=%d cp=U+%04X x=%d y=%d color=0x%X",
-                 self, (void*)fb, pitch_px, clipX, clipY, clipW, clipH,
-                 fbW, fbH, cp, x, y, (unsigned)color);
-        LOG_INFO(kCat, "DrawCtx dump +0x00..0x54: %08X %08X %08X %08X | %08X %08X %08X %08X | "
-                 "%08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X",
-                 d[0x00/4], d[0x04/4], d[0x08/4], d[0x0C/4],
-                 d[0x10/4], d[0x14/4], d[0x18/4], d[0x1C/4],
-                 d[0x20/4], d[0x24/4], d[0x28/4], d[0x2C/4],
-                 d[0x30/4], d[0x34/4], d[0x38/4], d[0x3C/4],
-                 d[0x40/4], d[0x44/4], d[0x48/4], d[0x4C/4],
-                 d[0x50/4]);
+    // ★ 09:2x 改为"每新表面 dump 一次"（最多 8 个）：区分 Tooltip 表面 vs 主界面表面
+    //   （clip 尺寸/偏移语义不同——3,3 偏移对 Tooltip 溢出框 → 叠加；0 则正常）
+    {
+        static uintptr_t s_dumpedFb[8];
+        static int s_dumpedN = 0;
+        bool isNew = true;
+        for (int i = 0; i < s_dumpedN; ++i)
+            if (s_dumpedFb[i] == fb) { isNew = false; break; }
+        if (isNew && s_dumpedN < 8) {
+            s_dumpedFb[s_dumpedN++] = fb;
+            uint32_t* d = (uint32_t*)self;
+            LOG_INFO(kCat, "SURFACE#%d: self=%p fb=%p pitch_px=%d clip=(%d,%d %dx%d) "
+                     "fbW=%d fbH=%d cp=U+%04X x=%d y=%d color=0x%X",
+                     s_dumpedN, self, (void*)fb, pitch_px, clipX, clipY, clipW, clipH,
+                     fbW, fbH, cp, x, y, (unsigned)color);
+            LOG_INFO(kCat, "DrawCtx dump +0x00..0x54: %08X %08X %08X %08X | %08X %08X %08X %08X | "
+                     "%08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X | %08X",
+                     d[0x00/4], d[0x04/4], d[0x08/4], d[0x0C/4],
+                     d[0x10/4], d[0x14/4], d[0x18/4], d[0x1C/4],
+                     d[0x20/4], d[0x24/4], d[0x28/4], d[0x2C/4],
+                     d[0x30/4], d[0x34/4], d[0x38/4], d[0x3C/4],
+                     d[0x40/4], d[0x44/4], d[0x48/4], d[0x4C/4],
+                     d[0x50/4]);
+        }
     }
     // ★ 防御：帧缓冲/步长异常一律跳过渲染，绝不往野指针写像素（防踩坏游戏内存 → 连锁崩溃）
     if (!fb || pitch_px <= 0 || pitch_px > 4096) { LOG_WARN(kCat, "RenderCodepoint skip: bad fb/pitch"); return; }
@@ -336,30 +360,48 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
     //   垂直居中基准 = cellH(g_fontSize) 即可（"居中是对的"）；不要用 lineH=clip.h，
     //   否则字形再下沉 3px + TextYOffset=3 → 太靠下。
     //   TextYOffset/TextXOffset 现在是纯平移微调（用户用 3,3 完美）。
+    // ★★ 09:2x 升级：垂直居中基准改用**字体行高**（font[8]+2，sub_40ECF9 行距推进值），
+    //   替代固定 cellH——不同 UI 字体行高不同：主界面≈20 → dy=y+3（等效旧 TextYOffset=3），
+    //   Tooltip 字体紧凑 → dy≈y+0（不再溢出引擎方框 → 叠加消失）。TextYOffset 归零微调。
     int cellH = g_fontSize;
+    int lineH = FontLineHeight(font);
+    if (lineH < g->h) lineH = g->h;                // 行高小于字形时不平移（贴顶，防溢出）
     int slotW = (cp < 0x80) ? (cellW / 2) : cellW;   // 半角 ASCII 占半格，全角占全格
     int dx = x + (slotW - g->w) / 2 + g_textXOffset;
-    int dy = y + (cellH - g->h) / 2 + g_textYOffset;
+    int dy = y + (lineH - g->h) / 2 + g_textYOffset;
+    // ★ 09:2x 首帧确认行高：主界面应≈20（居中偏移≈3），Tooltip 应紧凑（偏移≈0）
+    {
+        static bool s_loggedLine = false;
+        if (!s_loggedLine) {
+            s_loggedLine = true;
+            LOG_INFO(kCat, "LineHeight: font=%p font[8]=%d lineH=%d glyphH=%d dyOffset=%d",
+                     font, font ? *(const int*)((uintptr_t)font + 8) : -1, lineH, g->h,
+                     (lineH - g->h) / 2);
+        }
+    }
     // ★ 08:49 跨帧重绘去重：Tooltip 表面不清空，每帧重绘 → 中心像素已是目标色 → 跳过（防叠加模糊）
     //   08:5x 用引擎颜色（多 pass 时各 pass 颜色不同，检测色必须与本次要画的颜色一致）
     if (ShouldSkipRepeat((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbH)) return;
-    ge::text::GdiFontRasterizer::BlitGlyph((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbH);
+    ge::text::GdiFontRasterizer::BlitGlyph((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbH,
+                                           g_blendIdempotent);
 }
 
 // 字形层绘制 hook：sub_439610(__thiscall, ecx=字体对象; DrawContext=[ebp+0x0C]) 的 C 处理
 // ★ 全字符接管：ASCII(<0x80) 是完整码点直接渲染；≥0x80 走 UTF-8 重组。
 //   colorCtx = sub_439610 的 [ebp+8](a3)，{B,G,R} 字节数组（引擎颜色，还原多 pass 阴影/描边）。
+//   font = sub_439610 的 ecx（字体对象；+8=行高，用于垂直居中自适应）。
 //   返回 true=已接管绘制；false=未就绪（stub 会 relay 回引擎原函，防空字/崩）。
-static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx) {
+static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx, const void* font) {
     if (!g_ready) return false;
     if (!g_loggedOnce) {
         g_loggedOnce = true;
-        LOG_INFO(kCat, "OnGlyphDraw active: dc=%p ch=0x%X x=%d y=%d size=%d cfgColor=0x%X engColor=0x%X",
-                 dc, (unsigned)ch, x, y, g_fontSize, (unsigned)g_textColor, (unsigned)EngineColor(colorCtx));
+        LOG_INFO(kCat, "OnGlyphDraw active: dc=%p ch=0x%X x=%d y=%d size=%d cfgColor=0x%X engColor=0x%X font=%p",
+                 dc, (unsigned)ch, x, y, g_fontSize, (unsigned)g_textColor,
+                 (unsigned)EngineColor(colorCtx), font);
     }
     if (ch < 0x80) {
         // ASCII：单字节即完整码点，直接 GDI 渲染（用户拍板全接管）
-        RenderCodepoint(dc, (uint32_t)ch, x, y, colorCtx);
+        RenderCodepoint(dc, (uint32_t)ch, x, y, colorCtx, font);
         return true;
     }
     if ((ch & 0xC0) == 0x80) {
@@ -368,13 +410,13 @@ static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx)
         s_cp = (s_cp << 6) | (ch & 0x3F);
         if (++s_got < s_need) return true;  // 还需更多
         uint32_t cp = s_cp; s_buf = 0; s_got = 0; s_need = 0;
-        RenderCodepoint(dc, cp, s_lx, s_ly, s_color);
+        RenderCodepoint(dc, cp, s_lx, s_ly, s_color, s_font);
     } else {
-        // lead (0xC0..0xFF)：开新码点，记录起始 (x,y) 与颜色
+        // lead (0xC0..0xFF)：开新码点，记录起始 (x,y) 与颜色/字体
         if (ch >= 0xF0)         { s_cp = ch & 0x07; s_need = 3; }
         else if (ch >= 0xE0)    { s_cp = ch & 0x0F; s_need = 2; }
         else                    { s_cp = ch & 0x1F; s_need = 1; }
-        s_got = 0; s_buf = 1; s_lx = x; s_ly = y; s_color = colorCtx;
+        s_got = 0; s_buf = 1; s_lx = x; s_ly = y; s_color = colorCtx; s_font = font;
     }
     return true;
 }
@@ -405,7 +447,8 @@ extern "C" void __declspec(naked) GlyphDrawStub() {
         push esi
         push edi
         // OnGlyphDraw(dc=[ebp+0x0C]=DrawContext, ch=[ebp+0x10], x=[ebp+0x14], y=[ebp+0x18],
-        //             colorCtx=[ebp+8]=a3 {B,G,R} 引擎颜色)
+        //             colorCtx=[ebp+8]=a3 {B,G,R}, font=ecx=ebx)
+        push ebx          // font（sub_439610 的 ecx=字体对象；+8=行高）
         push [ebp+8]      // 颜色上下文（sub_4658C7 的 a6/arg_10；sub_410029(a1) 读 a1[0..2]）
         push [ebp+0x18]   // y
         push [ebp+0x14]   // x
@@ -413,7 +456,7 @@ extern "C" void __declspec(naked) GlyphDrawStub() {
         push eax          // ch
         push [ebp+0x0C]   // DrawContext = sub_439610 的 arg1（styleCtx 槽位，实为 DrawContext）
         call OnGlyphDraw
-        add  esp, 20
+        add  esp, 24
         test eax, eax
         jnz  L_done
         // 未就绪：relay 回引擎原函（★必须先还原 ecx=this）
@@ -490,6 +533,44 @@ static void InstallHooks(uintptr_t base) {
                     "(ASCII relays to engine; CJK -> GDI).");
 }
 
+// ★ 2026-08-12 09:1x 分词补丁（LG4/LG0 同款思路，★只打补丁①）：
+//   引擎文本处理默认"按空格分词"，中文无空格 → 整段中文被引擎当一个"超长词"→
+//   换行/宽度/Tooltip 框布局计算异常。
+//   ① RVA 0xD053B `jmp short loc_4D0516`(EB D9) → NOP：sub_4CFE93 富文本解析器
+//      词扫描循环单字符化。★已验证安全：NOP 后各路径（普通词/空白/'\n'/标签）
+//      edi 均前进，无死循环。
+//   ★★ ② RVA 0xE2251 `jnz short loc_4E222F`(75 DC) —— **不可用**！
+//      Saga sub_4E21B7 外层循环(0x4E21E3)不自行推进 String1，依赖收集循环
+//      (0x4E222F)消费整词推进；NOP 后只收集 1 字符，0x4E225D `dec edx` 把
+//      String1 拉回当前字符 → 外层无限重读同字符 → **死循环卡死**（选地图界面实测）。
+//      C3CD sub_4DCE33 外层自行推进，故 LG0 在 C3CD 有效；Saga 结构不同不可照搬。
+//      ⇒ 换行排版的中文适配改由 hook sub_43967D 实现（LG4 hook1=0x4396A5 同款）。
+//   写入前校验原字节，防版本不符写坏。
+static void InstallWordSplitPatches(uintptr_t base) {
+    const uint8_t nops[2] = { 0x90, 0x90 };
+    struct Pt { uint32_t rva; uint8_t b0, b1; const char* what; };
+    static const Pt pts[] = {
+        { 0xD053B, 0xEB, 0xD9, "rich-text parser word-loop" },
+        // { 0xE2251, 0x75, 0xDC, "layout word-collect loop" },  // ★ Saga 上 NOP 死循环，禁用
+    };
+    for (const auto& p : pts) {
+        uintptr_t va = base + p.rva;
+        auto cur = Patch::ReadBytes(va, 2);
+        if (cur.size() != 2 || cur[0] != p.b0 || cur[1] != p.b1) {
+            LOG_WARN(kCat, "WordSplitPatch SKIP @RVA 0x%X: bytes %02X %02X (expect %02X %02X) - %s",
+                     (unsigned)p.rva, cur.size() == 2 ? cur[0] : 0, cur.size() == 2 ? cur[1] : 0,
+                     p.b0, p.b1, p.what);
+            continue;
+        }
+        if (!Patch::WriteBytes(va, nops, 2)) {
+            LOG_ERROR(kCat, "WordSplitPatch FAIL @RVA 0x%X - %s", (unsigned)p.rva, p.what);
+        } else {
+            LOG_INFO(kCat, "WordSplitPatch OK @RVA 0x%X (%s) -> 90 90 (single-char word split)",
+                     (unsigned)p.rva, p.what);
+        }
+    }
+}
+
 // 解析 0xRRGGBB 文本色
 static uint32_t ParseColor(const std::string& s, uint32_t def) {
     if (s.empty()) return def;
@@ -525,6 +606,8 @@ public:
         g_textYOffset  = cfg.GetInt(kName, "TextYOffset", 0);
         g_textXOffset  = cfg.GetInt(kName, "TextXOffset", 0);
         g_useEngineColor = cfg.GetBool(kName, "UseEngineColor", true);
+        g_wordSplitPatch = cfg.GetBool(kName, "WordSplitPatch", true);
+        g_blendIdempotent = cfg.GetBool(kName, "BlendIdempotent", true);
 
         g_base = ver.GetBaseAddress();
         gameapi::Init(g_base);
@@ -535,6 +618,7 @@ public:
         if (g_selfTest) RunSelfTest();
         if (g_hookOn)  InstallHooks(g_base);
         else           LOG_INFO(kCat, "HookEnabled=0: glyph hooks not installed.");
+        if (g_wordSplitPatch) InstallWordSplitPatches(g_base);
         return true;
     }
 };
