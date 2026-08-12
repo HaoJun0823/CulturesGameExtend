@@ -1049,6 +1049,25 @@ static void InstallHooks(uintptr_t base) {
             LOG_ERROR(kCat, "InstallHooks: NOP 0x4CA612 FAIL");
     } else LOG_WARN(kCat, "InstallHooks: space-fix bytes mismatch @0x4CA612 (skip)");
 
+    // ★ 00:3x 超链接修复：0x4CA604 `and byte ptr [esi+48h],0`（case 2 词后**链接状态重置**）→ NOP。
+    //   机制（IDA 逆向）：<anch=ID> 标签 → case 7/8 设 this+72=1（链接状态）+ this+19=ID；
+    //   case 2 词 token 若 this+72 → 词带链接标志(+32=1,+36=ID)，然后 0x4CA604 **重置** this+72=0
+    //   → 只有锚点后**第一个词**是链接。命中检测 sub_4CA334：行垂直命中 → 词 token +4 矩形
+    //   （sub_4397C0 点-矩形）→ 返回命中词 → sub_4CA240 看 +36 激活。
+    //   WordSplitPatch=1（词=单字节）→ 链接文字拆成 N 词 → 只有第 1 词带链接标志 → 命中矩形
+    //   =1 字符 → 点击其余链接文字无效（用户 00:1x 实测"超链接无法触发"；=0 时词=整段正常）。
+    //   ★ NOP 后：链接状态保持到 case 7（this+19=-1 结束，普通词 +36=-1 → sub_4CA240 判非链接）
+    //   或排版结束（sub_4CA3C6 开头 this+72=0 重置）→ 链接内所有词都带标志 → 命中任意字符激活。
+    uintptr_t eLink = base + (0x4CA604 - 0x400000);
+    auto el = Patch::ReadBytes(eLink, 4);
+    if (el.size() == 4 && el[0] == 0x80 && el[1] == 0x66 && el[2] == 0x48 && el[3] == 0x00) {
+        const uint8_t nop4[4] = { 0x90, 0x90, 0x90, 0x90 };
+        if (Patch::WriteBytes(eLink, nop4, 4))
+            LOG_INFO(kCat, "InstallHooks: NOP'd link-state reset (0x4CA604, link spans all words).");
+        else
+            LOG_ERROR(kCat, "InstallHooks: NOP 0x4CA604 FAIL");
+    } else LOG_WARN(kCat, "InstallHooks: link-state bytes mismatch @0x4CA604 (skip)");
+
     // ★ 11:4x 超宽词字符级折行 hook（0x4E2267 测宽后，LG4 同款点）：
     //   超宽词截断为单字符 + String1 推进 → 引擎逐字符排版（修 IP/长词溢出、不显示）
     uintptr_t eLayMeas = base + (0x4E2267 - 0x400000);
