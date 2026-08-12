@@ -147,13 +147,10 @@ static std::wstring FontPathForCode(const std::string& code) {
     return root + L"\\plugins\\fonts\\" + wcode + L".ttf";
 }
 
-// ★ 2026-08-12 09:3x 多语言配置覆盖：
-//   plugins/fonts/<langcode>.ini 的 [TextRenderer] 段覆盖 CulturesGameExtend_Game.ini，
-//   实现"每个语言一套渲染配置"（字号/颜色/偏移/字体覆盖等）。
-//   语言代码与字体同源（Game.ini set_language -> LANG_TABLE_VA 0x4F338C），
-//   即 l10.ttf 对应 l10.ini、eng.ttf 对应 eng.ini ...。
-//   IniConfig::Merge(other)：other 的值覆盖当前对象 → cfg.Merge(langCfg)。
-//   必须在读取任何 [TextRenderer] 键之前调用。
+// ★ 多语言配置覆盖：plugins/fonts/<langcode>.ini 的 [TextRenderer] 段覆盖
+//   CulturesGameExtend_Game.ini，实现"每个语言一套渲染配置"。
+//   语言代码与字体同源（Game.ini set_language -> 0x4F338C 表）。
+//   IniConfig::Merge(other)：other 覆盖当前 → cfg.Merge(langCfg)。
 static void MergeLangOverrides(IniConfig& cfg) {
     int langId = ReadGameLangIdFromIni();
     std::string code = LangCodeForId(langId);
@@ -291,38 +288,6 @@ static uint32_t EngineColor(const uint8_t* c) {
     return ((uint32_t)c[2] << 16) | ((uint32_t)c[1] << 8) | c[0];
 }
 
-// ★ 10:0x 持久表面（Tooltip）识别：不清空的表面（每帧重绘同位置）用**零偏移**渲染。
-//   用户实测（08:2x + 10:0x）：TextXOffset=3 / 基线对齐 dy+4 会把 Tooltip 文字推出
-//   引擎画的方框 → 多 pass 错位叠加；09:40 版（X=0 + 墨迹居中）Tooltip 完全正常。
-//   检测：ShouldSkipRepeat 命中（同位置重绘 = 表面未清空）→ 标记该 fb 为持久表面，
-//   后续该 fb 的绘制用 09:40 公式（墨迹居中 + X=0）；2 秒无绘制自动重置。
-struct FbState { uintptr_t fb; DWORD t; int mode; };   // mode: 0=普通, 1=持久(Tooltip)
-static FbState s_fbState[64];
-static int GetFbMode(uintptr_t fb) {
-    DWORD now = GetTickCount();
-    for (int i = 0; i < 64; ++i) {
-        if (s_fbState[i].fb == fb) {
-            if (now - s_fbState[i].t > 2000) { s_fbState[i].mode = 0; }  // 过期重置
-            s_fbState[i].t = now;
-            return s_fbState[i].mode;
-        }
-    }
-    // 未记录：覆盖最旧槽位
-    int oldest = 0; DWORD ot = GetTickCount();
-    for (int i = 0; i < 64; ++i) if (s_fbState[i].t < ot) { ot = s_fbState[i].t; oldest = i; }
-    s_fbState[oldest] = { fb, now, 0 };
-    return 0;
-}
-static void MarkFbPersistent(uintptr_t fb) {
-    DWORD now = GetTickCount();
-    for (int i = 0; i < 64; ++i) {
-        if (s_fbState[i].fb == fb) { s_fbState[i].mode = 1; s_fbState[i].t = now; return; }
-    }
-    int oldest = 0; DWORD ot = GetTickCount();
-    for (int i = 0; i < 64; ++i) if (s_fbState[i].t < ot) { ot = s_fbState[i].t; oldest = i; }
-    s_fbState[oldest] = { fb, now, 1 };
-}
-
 // 渲染一个码点到 DrawContext 表面（引擎已在 (x,y) 给出该字形的左上角）
 static bool g_dumpedDrawCtx = false;
 
@@ -330,59 +295,48 @@ static bool g_dumpedDrawCtx = false;
 //   08:49 诊断定案：dt=31ms = **跨帧重绘叠加**（Tooltip 每帧重绘到持久表面不清空）。
 //   原版硬边位图叠加无变化；GDI 抗锯齿字形边缘 alpha 渐变叠加 → 重影。
 //   普通文字表面每帧清空，所以不叠加。
-//   ★ 09:5x 中心单点 → **5 采样点**（中心+上下左右，命中≥2 视为已画过）：
-//     空心字符（o/g/日 等）中心在笔画间隙=背景，单点永远不命中 → Tooltip 每帧
-//     重绘累积叠加（09:59 容差收紧后复现）；四边是笔画（已画=前景）→ 多点命中。
-//     纯浅色背景 5 点全差 > 容差 → 不误跳（g 缺失根因）。对清空/不清空表面都正确。
+//   ★ 修复方案：绘制前检查字形中心像素是否已是目标色——是 → 表面未清空(重绘) → 跳过；
+//     否 → 正常画。对"清空/不清空"两种表面都正确。
 static bool ShouldSkipRepeat(uint8_t* fb, int pitchBytes, int bpp, int dx, int dy,
                              const ge::text::Glyph* g, uint32_t color, int fbW, int fbH) {
-    if (!fb || !g || g->w < 3 || g->h < 3) return false;
-    const int sx[5] = { g->w / 2, g->w / 4, g->w * 3 / 4, g->w / 2, g->w / 2 };
-    const int sy[5] = { g->h / 2, g->h / 2, g->h / 2, g->h / 4, g->h * 3 / 4 };
-    int hit = 0;
-    for (int i = 0; i < 5; ++i) {
-        int cx = dx + sx[i], cy = dy + sy[i];
-        if (cx < 0 || cx >= fbW || cy < 0 || cy >= fbH) continue;
-        const uint8_t* p = fb + (size_t)cy * pitchBytes + (size_t)cx * bpp;
-        bool near = false;
-        if (bpp == 4) {
-            uint8_t tr = (uint8_t)((color >> 16) & 0xFF);
-            uint8_t tg = (uint8_t)((color >> 8) & 0xFF);
-            uint8_t tb = (uint8_t)(color & 0xFF);
-            near = (p[2] > tr - 8 && p[2] < tr + 8) &&
-                   (p[1] > tg - 8 && p[1] < tg + 8) &&
-                   (p[0] > tb - 8 && p[0] < tb + 8);
-        } else if (bpp == 2) {
-            uint16_t v = *(const uint16_t*)p;
-            uint16_t tc = (uint16_t)((((color >> 16) & 0xFF) >> 3) << 11 |
-                                     (((color >> 8) & 0xFF) >> 2) << 5 |
-                                     ((color & 0xFF) >> 3));
-            int dr = ((v >> 11) & 0x1F) - ((tc >> 11) & 0x1F);
-            int dg = ((v >> 5) & 0x3F) - ((tc >> 5) & 0x3F);
-            int db = (v & 0x1F) - (tc & 0x1F);
-            near = dr > -2 && dr < 2 && dg > -2 && dg < 2 && db > -2 && db < 2;
-        }
-        if (near) ++hit;
+    if (!fb || !g || g->w < 2 || g->h < 2) return false;
+    int cx = dx + g->w / 2;
+    int cy = dy + g->h / 2;
+    if (cx < 0 || cx >= fbW || cy < 0 || cy >= fbH) return false;
+    const uint8_t* p = fb + (size_t)cy * pitchBytes + (size_t)cx * bpp;
+    if (bpp == 4) {
+        uint8_t tr = (uint8_t)((color >> 16) & 0xFF);
+        uint8_t tg = (uint8_t)((color >> 8) & 0xFF);
+        uint8_t tb = (uint8_t)(color & 0xFF);
+        // 容差 24：抗锯齿中心墨迹≈纯色；背景色差异明显
+        return (p[2] > tr - 24 && p[2] < tr + 24) &&
+               (p[1] > tg - 24 && p[1] < tg + 24) &&
+               (p[0] > tb - 24 && p[0] < tb + 24);
+    } else if (bpp == 2) {
+        uint16_t v = *(const uint16_t*)p;
+        uint16_t tc = (uint16_t)((((color >> 16) & 0xFF) >> 3) << 11 |
+                                 (((color >> 8) & 0xFF) >> 2) << 5 |
+                                 ((color & 0xFF) >> 3));
+        int dr = ((v >> 11) & 0x1F) - ((tc >> 11) & 0x1F);
+        int dg = ((v >> 5) & 0x3F) - ((tc >> 5) & 0x3F);
+        int db = (v & 0x1F) - (tc & 0x1F);
+        return dr > -3 && dr < 3 && dg > -4 && dg < 4 && db > -3 && db < 3;
     }
-    return hit >= 2;
+    return false;
 }
 
-// ★ 09:4x 半角/全角分类：只有 CJK 及全角形式才是"全格"；西语/希腊/西里尔等
-//   Latin 扩展字母是半角（≈ASCII 宽）。旧逻辑 cp>=0x80 一律全格 → 西语字母
-//   每个占中文宽度（"距离很奇怪"）。
+// ★ 半角/全角分类：只有 CJK 及全角形式才是"全格"；西语/希腊/西里尔等 Latin 扩展
+//   字母是半角（≈ASCII 宽）。旧逻辑 cp>=0x80 一律全格 → 西语字母占中文宽度（间距怪）。
 static bool IsWideCodepoint(uint32_t cp) {
     if (cp < 0x80) return false;                    // ASCII：半角
     if (cp >= 0x2E80 && cp <= 0x9FFF) return true;  // CJK 部首 + 统一汉字
     if (cp >= 0xF900 && cp <= 0xFAFF) return true;  // CJK 兼容汉字
-    if (cp >= 0xFF00 && cp <= 0xFF60) return true;  // 全角形式（FF01-FF5E 全角 ASCII）
+    if (cp >= 0xFF00 && cp <= 0xFF60) return true;  // 全角形式
     if (cp >= 0x3000 && cp <= 0x303F) return true;  // CJK 标点（U+3000 全角空格）
     return false;                                   // Latin/希腊/西里尔等：半角
 }
 
-// ★ 09:4x 防野指针/越界崩溃：引擎可能释放帧缓冲表面，或 DrawContext 的 +0x18
-//   是"宽-1"而非高度（全屏表面 800x600 → +0x18=799），按它裁剪会越界读写
-//   （Game.exe.36424.dmp / 48924.dmp：0xC0000005 读 @0x235AA110 / @0x233E3110）。
-//   逐区域校验目标范围 [p, p+n) 全部"已提交 + 可读"，非法则调用方跳过渲染。
+// ★ 防野指针/越界：逐区域校验 [p, p+n) 全部"已提交 + 可读"。
 static bool IsRangeMapped(const void* p, size_t n) {
     if (!p) return false;
     const uint8_t* cur = (const uint8_t*)p;
@@ -391,21 +345,52 @@ static bool IsRangeMapped(const void* p, size_t n) {
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery(cur, &mbi, sizeof(mbi)) == 0) return false;
         if (mbi.State != MEM_COMMIT) return false;
-        DWORD prot = mbi.Protect & 0xFF;   // 低字节 = 基本保护标志
+        DWORD prot = mbi.Protect & 0xFF;
         switch (prot) {
             case PAGE_READONLY: case PAGE_READWRITE: case PAGE_WRITECOPY:
             case PAGE_EXECUTE_READ: case PAGE_EXECUTE_READWRITE: case PAGE_EXECUTE_WRITECOPY:
                 break;
-            default: return false;         // NOACCESS / EXECUTE
+            default: return false;
         }
         const uint8_t* next = (const uint8_t*)mbi.BaseAddress + mbi.RegionSize;
-        if (next <= cur) return false;     // 防御：区域大小异常
+        if (next <= cur) return false;
         cur = next;
     }
     return true;
 }
 
-// ★ 09:4x 引擎行高自适应垂直居中：不同 UI 用不同字体对象（sub_439610 的 ecx），
+// ★ 探测 fb 实际可写行数（二分 + per-fb 缓存）：
+//   DrawContext +0x18 是"宽-1"非高度（全屏 800x600 → 799），直接当高度裁剪会越界；
+//   按 pitchBytes 探测到分配边界即真实可写高度 → 越界像素被 BlitGlyph 裁掉（不崩），
+//   g 等带 descender 的字形只要主体合法就正常画（不整字跳过 → 不缺失）。
+struct FbState { uintptr_t fb; DWORD t; int mode; int realH; };   // mode: 0=普通, 1=持久(Tooltip)
+static FbState s_fbState[64];
+static FbState* FindFbState(uintptr_t fb) {
+    DWORD now = GetTickCount();
+    for (int i = 0; i < 64; ++i) {
+        if (s_fbState[i].fb == fb) {
+            if (now - s_fbState[i].t > 2000) { s_fbState[i].mode = 0; s_fbState[i].realH = 0; }
+            s_fbState[i].t = now;
+            return &s_fbState[i];
+        }
+    }
+    int oldest = 0; DWORD ot = GetTickCount();
+    for (int i = 0; i < 64; ++i) if (s_fbState[i].t < ot) { ot = s_fbState[i].t; oldest = i; }
+    s_fbState[oldest] = { fb, now, 0, 0 };
+    return &s_fbState[oldest];
+}
+static int ProbeFbHeight(uintptr_t fb, int pitchBytes, int maxH) {
+    if (maxH <= 0 || maxH > 4096) return 0;
+    int lo = 0, hi = maxH;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (IsRangeMapped((const void*)fb, (size_t)mid * pitchBytes)) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
+}
+
+// ★ 引擎行高自适应垂直居中：不同 UI 用不同字体对象（sub_439610 的 ecx），
 //   行距 = 字体对象+8 的值 + 2（sub_40ECF9 反编译实锤 `a5 += a2[2] + 2`）。
 //   主界面字体行高≈20 → 居中偏移 (20-13)/2≈3（正是用户手工调出的 TextYOffset=3）；
 //   Tooltip 字体行高紧凑 → 偏移≈0（不再溢出引擎画的方框 → 叠加消失）。
@@ -499,52 +484,36 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
     int cellW = g_fontSize;
     int cellH = g_fontSize;
     int lineH = FontLineHeight(font);
-    int slotW = IsWideCodepoint(cp) ? cellW : (cellW / 2);   // 全角=全格，半角=半格
-    int fontH = g_raster.Ascent() + g_raster.Descent();
-    int centerOff = (lineH - fontH) / 2;                     // 行内居中（普通字符）
-    if (centerOff < 0) centerOff = 0;
-    int dx, dy;
-    // ★ 10:0x 持久表面（Tooltip）用零偏移（09:40 版公式，用户实测正常）：
-    //   X=0（不出框）+ 墨迹高居中（dy=y+(lineH-g->h)/2，无基线+4 下移）。
+    // ★ 10:1x 半角/全角分类（西语半格）+ 基线对齐（西语基线齐）：
+    //   持久表面（Tooltip，ShouldSkipRepeat 命中即标记）用 09:40 墨迹居中 + X=0
+    //   （用户实测该组合 Tooltip 完全正常，偏移会推出引擎方框 → 叠加）；
     //   普通表面用基线对齐 + TextXOffset（西语基线齐 + 其他文字水平校正）。
-    if (GetFbMode(fb) == 1) {
-        if (lineH < g->h) lineH = g->h;   // 行高小于字形时贴顶
-        dx = x + (slotW - g->w) / 2;      // ★ Tooltip 不加 TextXOffset（出框 → 叠加）
-        dy = y + (lineH - g->h) / 2 + g_textYOffset;
+    FbState* st = FindFbState(fb);
+    int slotW = IsWideCodepoint(cp) ? cellW : (cellW / 2);
+    int dx, dy;
+    if (st->mode == 1) {
+        int lh = lineH; if (lh < g->h) lh = g->h;
+        dx = x + (slotW - g->w) / 2;               // Tooltip：无 TextXOffset（出框 → 叠加）
+        dy = y + (lh - g->h) / 2 + g_textYOffset;  // Tooltip：墨迹居中（09:40 公式）
     } else {
+        int fontH = g_raster.Ascent() + g_raster.Descent();
+        int centerOff = (lineH - fontH) / 2; if (centerOff < 0) centerOff = 0;
         dx = x + (slotW - g->w) / 2 + g_textXOffset;
         dy = y + centerOff + g_raster.Ascent() + g->originY + g_textYOffset;
     }
-    // ★ 09:4x 首帧确认基线参数（ascent/descent/originY 关系）
-    {
-        static bool s_loggedBase = false;
-        if (!s_loggedBase) {
-            s_loggedBase = true;
-            LOG_INFO(kCat, "Baseline: ascent=%d descent=%d fontH=%d lineH=%d centerOff=%d "
-                     "cp=U+%04X originY=%d dy=y+%d",
-                     g_raster.Ascent(), g_raster.Descent(), fontH, lineH, centerOff,
-                     cp, g->originY, centerOff + g_raster.Ascent() + g->originY);
-        }
-    }
-    // ★ 09:5x 校验字形实际绘制范围 [fb, 右下角字节) 全部已提交可读——
-    //   +0x18 是"宽-1"非高度（全屏 800x600 → 799），按它裁剪会越界读写
-    //   （Game.exe.48924/36424.dmp 两次 0xC0000005 读崩实锤）。
-    //   越界区域（引擎已释放/仅部分分配）直接跳过渲染，优先稳定不崩。
-    {
-        int fyMax = dy + g->h; if (fyMax < 0) return; if (fyMax > fbH) fyMax = fbH;
-        int fxMax = dx + g->w; if (fxMax > fbW) fxMax = fbW;
-        if (fxMax <= 0 || fyMax <= 0) return;
-        size_t need = (size_t)fyMax * pitchBytes + (size_t)fxMax * bpp + bpp;
-        if (!IsRangeMapped((const void*)fb, need)) return;
-    }
-    // ★ 08:49 跨帧重绘去重：Tooltip 表面不清空，每帧重绘 → 采样点已是目标色 → 跳过（防叠加模糊）
+    // ★ 10:1x 实际可写高度探测（per-fb 缓存）：防越界（+0x18 是宽-1）+ g 不缺失
+    if (st->realH <= 0) st->realH = ProbeFbHeight(fb, pitchBytes, fbH);
+    int fbHReal = st->realH;
+    if (fbHReal <= 0) return;
+    if (fbHReal > fbH) fbHReal = fbH;
+    // ★ 08:49 跨帧重绘去重：Tooltip 表面不清空，每帧重绘 → 中心像素已是目标色 → 跳过（防叠加模糊）
     //   08:5x 用引擎颜色（多 pass 时各 pass 颜色不同，检测色必须与本次要画的颜色一致）
-    //   ★ 10:0x 命中即标记该 fb 为持久表面（下帧起用零偏移，Tooltip 不出框）
-    if (ShouldSkipRepeat((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbH)) {
-        MarkFbPersistent(fb);
+    //   ★ 10:1x 命中即标记该 fb 为持久表面（下帧起零偏移）
+    if (ShouldSkipRepeat((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbHReal)) {
+        st->mode = 1;
         return;
     }
-    ge::text::GdiFontRasterizer::BlitGlyph((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbH,
+    ge::text::GdiFontRasterizer::BlitGlyph((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbHReal,
                                            g_blendIdempotent);
 }
 
@@ -585,11 +554,8 @@ static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx,
 
 // 字宽 hook：sub_439633(__thiscall) 的 C 处理
 // ★★ 方案A：固定格子宽（mirror LG sub_10002D40 等宽模型）——
+//   ASCII(单字节, 含空格) = 半格 cellW/2；CJK lead = 全格 cellW；continuation = 0。
 //   引擎排版循环用本返回值推进 x，与渲染的格子完全同步 → 消除累积偏移。
-//   ★ 09:4x 半角/全角分类修正：2 字节 lead（0xC0-0xDF → U+0080-U+07FF Latin/
-//     希腊/西里尔等）= **半格**（西语字母≈ASCII 宽）；3/4 字节 lead（0xE0+ →
-//     CJK/全角）= **全格**。旧逻辑 0xC0+ 一律全格 → 西语间距=中文宽度（"距离很奇怪"）。
-//   ASCII 单字节 = 半格；continuation = 0（不前进）。
 //   返回 -1 = 未就绪（stub relay 回引擎原函）。
 static int OnGlyphWidth(int /*font*/, int ch) {
     if (!g_ready) return -1;
@@ -597,9 +563,9 @@ static int OnGlyphWidth(int /*font*/, int ch) {
         // ASCII / 空格：半格（LG: v19==32 -> a5 += 格宽>>1；其他 ASCII 同半格）
         return g_fontSize / 2;
     }
-    if ((ch & 0xC0) == 0x80) return 0;   // continuation：不前进
-    if (ch < 0xE0) return g_fontSize / 2; // 2 字节 lead（Latin/希腊/西里尔等）：半格
-    return g_fontSize;                    // 3/4 字节 lead（CJK/全角）：全格
+    if ((ch & 0xC0) == 0x80) return 0;      // continuation：不前进
+    if (ch < 0xE0) return g_fontSize / 2;   // 2 字节 lead（Latin/希腊/西里尔等）：半格
+    return g_fontSize;                      // 3/4 字节 lead（CJK/全角）：全格
 }
 
 // ---- sub_439610(__thiscall, ecx=字体对象; DrawContext=[ebp+0x0C]) 替换 stub ----
@@ -754,7 +720,7 @@ public:
     GameTarget  GetTarget() const override { return GameTarget::Game; }
 
     bool OnInstall(IniConfig& cfg, GameVersion& ver) override {
-        // ★ 09:3x 语言配置覆盖必须先于一切 [TextRenderer] 读取（含 Enabled）
+        // ★ 语言配置覆盖必须先于一切 [TextRenderer] 读取（含 Enabled）
         MergeLangOverrides(cfg);
         g_enabled = cfg.GetBool(kName, "Enabled", false);
         if (!g_enabled) { LOG_INFO(kCat, "Disabled (Enabled=0)"); return true; }
