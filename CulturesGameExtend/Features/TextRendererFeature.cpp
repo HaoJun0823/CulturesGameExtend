@@ -283,7 +283,9 @@ static uintptr_t g_thunkWidth = 0;   // sub_439633 跳板
 //   Tooltip 画多 pass 时各 pass 颜色不同（阴影/描边深色 + 主体白色），旧代码统一用
 //   g_textColor(白) → 两遍白色叠加 → 残留重影。改用引擎颜色 → 还原原版颜色/阴影，重影消失。
 static bool g_useEngineColor = true;
-static bool g_wordSplitPatch = true;  // ★20:5x 默认开（用户 19:50 实测：内容完整性依赖它）；"分散"由 SpaceFixStub 修
+static bool g_wordSplitPatch = false;  // ★23:0x 默认关（弃用）：补丁① 让词扫描单字节化 → GBK 字拆碎 →
+                                       //   富文本每字节后空格宽 → 分散；且 0x4CA612 修分散的 hook 点不安全（消失）。
+                                       //   正确组合 = 关补丁① + WordColStub（sub_4E21B7 CJK 单码点词）+ OverflowStub
 static bool g_blendIdempotent = true;  // BlitGlyph 像素级幂等（防不清空表面跨帧累积）
 static uint32_t EngineColor(const uint8_t* c) {
     if (!c || !g_useEngineColor) return g_textColor;
@@ -563,6 +565,9 @@ static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx,
 //   返回 -1 = 未就绪（stub relay 回引擎原函）。
 static int OnGlyphWidth(int /*font*/, int ch) {
     if (!g_ready) return -1;
+    if (ch <= 0) return 0;              // ★21:2x NUL/负：引擎 sub_43967D 测宽循环会先处理词尾 \0 再判断停止，
+                                        //   若按 ASCII 返回 9px → 每词尾 +9px 假间距（WordSplitPatch=1 每字=词时
+                                        //   → "你(14+9) 好(14+9)" 分散；LG4 对 NUL 走原逻辑返回 0）
     if (ch < 0x80) {
         // ASCII / 空格：半格 + HalfCellExtra（★10:3x 西文间距偏近 → 加宽）
         return g_fontSize / 2 + g_halfCellExtra;
@@ -858,46 +863,31 @@ extern "C" void __declspec(naked) WrapStub() {
 //   **CJK 词（[edi+4] 首字节 ≥0x80）→ 空格宽=0**（中文紧凑连续）；ASCII 词保持原样。
 //   寄存器：esi=排版上下文(+0x38=x)、edi=当前词 token(+4=词字符串)、ebp=[ebp-4]=词宽。
 // ===================================================================
-// 富文本词 token 内容输出（0x4CA556 路径）
+// 富文本词 token 内容输出（0x4CA612 路径）——hex dump 确认词缓冲真实编码（GBK vs UTF-8）
 static void SpaceLog(void* token) {
     static int n = 0;
-    if (n >= 12) return;
+    if (n >= 8) return;
     if (!token) return;
     MEMORY_BASIC_INFORMATION mbi = {};
     if (VirtualQuery((char*)token + 4, &mbi, sizeof(mbi)) == 0) return;
     if (mbi.State != MEM_COMMIT) return;
     const char* s = *(const char**)((char*)token + 4);
     if (!s || (uintptr_t)s < 0x10000) return;
-    char buf[64] = {0};
-    int bi = 0;
-    for (int i = 0; i < 63 && s[i]; i++) {
-        unsigned char c = (unsigned char)s[i];
-        if (c >= 0x20 && c != 0x7F) buf[bi++] = (char)c;
-        else if (bi > 0) break;
-    }
-    buf[bi] = 0;
     n++;
-    LOG_INFO(kCat, "Space[%d]: '%s' (rich-text word)", n, buf);
+    unsigned char h[8] = {0};
+    for (int i = 0; i < 8; i++) h[i] = (unsigned char)s[i];
+    LOG_INFO(kCat, "SpaceHex[%d]: %02X %02X %02X %02X %02X %02X %02X %02X", n,
+             h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
 }
 
 extern "C" void __declspec(naked) SpaceFixStub() {
     __asm {
-        pushad
-        // SpaceLog(edi) —— 输出富文本词内容
-        push edi
-        call SpaceLog
-        add  esp, 4
-        mov  ecx, [edi + 4]       // 词字符串
-        test ecx, ecx
-        je   L_sp_ascii
-        cmp  byte ptr [ecx], 0x80
-        jb   L_sp_ascii           // ASCII → 保留空格宽
-        mov  dword ptr [esp + 28], 0   // CJK → 空格宽 = 0（改 pushad 保存的 eax）
-    L_sp_ascii:
-        popad
-        add  dword ptr [esi + 0x38], eax   // 原指令：x += 空格宽（CJK 时 0）
-        mov  eax, dword ptr [ebp - 4]      // 原指令
-        mov  eax, 4CA55Ch                  // 跳过已执行，回 0x4CA55C（cmp eax,[esi+0x44]）
+        // ★★ 22:5x 二分实验：纯执行原指令（不 pushad / 不 LOG / 不改 eax）——
+        //   测 0x4CA612 hook 点本身是否安全。若文字恢复 → hook 点 OK，问题在
+        //   pushad/SpaceLog/eax 修改；若仍消失 → 0x4CA612 不可安全 hook（换策略）。
+        add  dword ptr [esi + 0x38], eax   // 原指令：x += 空格宽（原样）
+        mov  eax, dword ptr [ebp - 8]      // 原指令：v33
+        mov  eax, 4CA618h                  // 回 0x4CA618（jmp 0x4CA55C）
         jmp  eax
     }
 }
@@ -1031,13 +1021,21 @@ static void InstallHooks(uintptr_t base) {
     //         LOG_INFO(kCat, "InstallHooks: hooked sub_40ECF9 draw-entry (text capture, safe).");
     // } else LOG_WARN(kCat, "InstallHooks: drawtext bytes mismatch (skip)");
 
-    // ★ 19:5x 富文本"词后空格"修复（0x4CA556，0x4CA3C6 排版内）——CJK 词后空格宽=0
-    uintptr_t eSpace = base + (0x4CA556 - 0x400000);
+    // ★ 23:0x 定案：0x4CA612 E9 hook 连纯跳转 stub 都导致文字消失 → **改用 3 字节 NOP**：
+    //   把 `add [esi+38h],eax`（x += 空格宽）NOP 掉 → 词后空格=0 → 中文紧凑。
+    //   ★ NOP 不跳转、不碰寄存器/栈，规避 E9 hook 的消失问题（用户 23:32 实测短文本正常=引擎原逻辑 OK）。
+    //   ★ 配合 WordSplitPatch=1（词=单字节 → 不超宽 → 长文本完整）+ sub_4C9DAD 的 x-=9 在
+    //   左对齐(this+21=0)时无害。
+    uintptr_t eSpace = base + (0x4CA612 - 0x400000);
     auto espc = Patch::ReadBytes(eSpace, 6);
-    if (espc.size() == 6 && espc[0] == 0x01 && espc[1] == 0x46 && espc[2] == 0x38) {
-        if (Patch::WriteJmp(eSpace, (uintptr_t)&SpaceFixStub))
-            LOG_INFO(kCat, "InstallHooks: hooked rich-text word-space (0x4CA556, CJK no trailing space).");
-    } else LOG_WARN(kCat, "InstallHooks: space-fix bytes mismatch (skip)");
+    if (espc.size() == 6 && espc[0] == 0x01 && espc[1] == 0x46 && espc[2] == 0x38 &&
+        espc[4] == 0x45 && espc[5] == 0xF8) {
+        const uint8_t nop3[3] = { 0x90, 0x90, 0x90 };
+        if (Patch::WriteBytes(eSpace, nop3, 3))
+            LOG_INFO(kCat, "InstallHooks: NOP'd rich-text word-space (0x4CA612 add[esi+38h],eax -> NOP, CJK compact).");
+        else
+            LOG_ERROR(kCat, "InstallHooks: NOP 0x4CA612 FAIL");
+    } else LOG_WARN(kCat, "InstallHooks: space-fix bytes mismatch @0x4CA612 (skip)");
 
     // ★ 11:4x 超宽词字符级折行 hook（0x4E2267 测宽后，LG4 同款点）：
     //   超宽词截断为单字符 + String1 推进 → 引擎逐字符排版（修 IP/长词溢出、不显示）
@@ -1121,7 +1119,7 @@ public:
         g_antiAlias      = cfg.GetBool(kName, "AntiAlias", true);
         g_halfCellExtra  = cfg.GetInt(kName, "HalfCellExtra", 1);
         g_containerLeftFix = cfg.GetBool(kName, "ContainerLeftFix", false);
-        g_wordSplitPatch = cfg.GetBool(kName, "WordSplitPatch", true);  // ★20:5x 默认开（内容完整依赖）
+        g_wordSplitPatch = cfg.GetBool(kName, "WordSplitPatch", false);  // ★23:0x 默认关（弃用，见 286 行注释）
         g_blendIdempotent = cfg.GetBool(kName, "BlendIdempotent", true);
 
         g_base = ver.GetBaseAddress();
