@@ -82,17 +82,19 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup Label="DeployContent">
-    <DeployContent Include="plugins\config\**\*" />
+    <!-- 资源统一放在项目根 Resource/（镜像游戏根目录）；这里把整棵树拷进输出目录 -->
+    <DeployContent Include="..\Resource\**\*" />
   </ItemGroup>
   <Target Name="CopyDeployContent" AfterTargets="Build">
+    <!-- %(RecursiveDir) 相对 ..\Resource\，保留 plugins\config\... 结构 -->
     <Copy SourceFiles="@(DeployContent)"
-          DestinationFiles="@(DeployContent->'$(OutDir)%(RelativeDir)%(Filename)%(Extension)')"
+          DestinationFiles="@(DeployContent->'$(OutDir)%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
     <MakeDir Directories="$(OutDir)plugins" />
     <Copy SourceFiles="$(OutDir)$(TargetName)$(TargetExt)"
           DestinationFiles="$(OutDir)plugins\$(TargetName)$(TargetExt)"
           SkipUnchangedFiles="true" />
-    <Message Importance="high" Text="Deployed plugins/config -> $(OutDir)" />
+    <Message Importance="high" Text="Deployed Resource/ -> $(OutDir)" />
   </Target>
   <ItemGroup>
     <ClInclude Include="framework.h" />

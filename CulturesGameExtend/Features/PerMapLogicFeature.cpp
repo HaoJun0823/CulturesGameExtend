@@ -160,8 +160,8 @@ static void PatchGoodGlobals(DWORD b, bool useShadow) {
 static bool GoodTypesOverrideDiffers() {
     if (!g_mapSrcStr[0]) return false;
     char p[MAX_PATH], q[MAX_PATH];
-    sprintf(p, "%s\\logic\\goodtypes.ini", g_mapSrcStr);
-    sprintf(q, "data\\logic\\goodtypes.ini");
+    sprintf_s(p, "%s\\logic\\goodtypes.ini", g_mapSrcStr);
+    sprintf_s(q, "data\\logic\\goodtypes.ini");
     HANDLE hp = CreateFileA(p, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (hp == INVALID_HANDLE_VALUE) return false; // 无覆盖 -> 全局
     HANDLE hq = CreateFileA(q, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -238,8 +238,8 @@ static void ReloadGoodTypesSafe(DWORD b) {
             ++nd;
             if (g_dbg && used < 5) {
                 char one[48];
-                sprintf(one, " g%d+%d:%d->%d", off / 208, off % 208, (int)x, (int)y);
-                if (strlen(det) + strlen(one) < sizeof(det) - 1) { strcat(det, one); ++used; }
+                sprintf_s(one, " g%d+%d:%d->%d", off / 208, off % 208, (int)x, (int)y);
+                if (strlen(det) + strlen(one) < sizeof(det) - 1) { strcat_s(det, one); ++used; }
             }
         }
         LOG_INFO(kCat, "  [diff] dwords changed vs pre-reload = %d%s", nd,
@@ -261,10 +261,10 @@ static void ReloadGoodTypesAtEntry() {
     g_mapSrcStr[0] = 0;
     g_mapHasLogic = false;
     if (g_mapSrc && *(char*)g_mapSrc) {
-        strncpy(g_mapSrcStr, (const char*)g_mapSrc, sizeof(g_mapSrcStr) - 1);
+        strncpy_s(g_mapSrcStr, (const char*)g_mapSrc, sizeof(g_mapSrcStr) - 1);
         g_mapSrcStr[sizeof(g_mapSrcStr) - 1] = 0;
         char dir[MAX_PATH];
-        sprintf(dir, "%s\\logic", g_mapSrcStr);
+        sprintf_s(dir, "%s\\logic", g_mapSrcStr);
         g_mapHasLogic = (GetFileAttributesA(dir) != INVALID_FILE_ATTRIBUTES);
     }
     // 无论本图有无 logic 目录，goodtypes 都必须在入口处理一次：
@@ -343,7 +343,7 @@ static const char* __cdecl PathRewrite(const char* path) {
     if (!g_mapHasLogic || !g_mapSrcStr[0]) return path;
     for (int i = 0; i < 12; ++i) {
         if (_stricmp(path, g_canonical[i]) != 0) continue;
-        sprintf(g_candidate, "%s\\logic\\%s", g_mapSrcStr, kLogicFiles[i].logical);
+        sprintf_s(g_candidate, "%s\\logic\\%s", g_mapSrcStr, kLogicFiles[i].logical);
         if (GetFileAttributesA(g_candidate) != INVALID_FILE_ATTRIBUTES)
             return g_candidate;
         return path; // 该表缺失 -> 全局
@@ -359,10 +359,10 @@ static void ReloadLogicForMap() {
     g_mapSrcStr[0] = 0;
     g_mapHasLogic = false;
     if (g_mapSrc && *(char*)g_mapSrc) {
-        strncpy(g_mapSrcStr, (const char*)g_mapSrc, sizeof(g_mapSrcStr) - 1);
+        strncpy_s(g_mapSrcStr, (const char*)g_mapSrc, sizeof(g_mapSrcStr) - 1);
         g_mapSrcStr[sizeof(g_mapSrcStr) - 1] = 0;
         char dir[MAX_PATH];
-        sprintf(dir, "%s\\logic", g_mapSrcStr);
+        sprintf_s(dir, "%s\\logic", g_mapSrcStr);
         g_mapHasLogic = (GetFileAttributesA(dir) != INVALID_FILE_ATTRIBUTES);
     }
     const char* ident = g_mapSrcStr[0] ? g_mapSrcStr
@@ -410,7 +410,7 @@ static void ReloadLogicForMap() {
         int r = 0;
         if (g_mapSrcStr[0]) {
             char p[MAX_PATH];
-            sprintf(p, "%s\\logic\\%s", g_mapSrcStr, kLogicFiles[i].logical);
+            sprintf_s(p, "%s\\logic\\%s", g_mapSrcStr, kLogicFiles[i].logical);
             r = (GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
             if (r) ++over;
         }
@@ -537,7 +537,7 @@ public:
 
         // 1) 预生成 12 条规范路径
         for (int i = 0; i < 12; ++i)
-            sprintf(g_canonical[i], "data\\logic\\%s", kLogicFiles[i].logical);
+            sprintf_s(g_canonical[i], "data\\logic\\%s", kLogicFiles[i].logical);
 
         // 2) IniFile_Open trampoline + hook
         uintptr_t iniEntry = b + (VA_IniFileOpen - 0x400000);
@@ -569,7 +569,7 @@ public:
                 }
             }
         } else {
-            LOG_WARN(kCat, "entry 0x%X 序言不符，跳过入口 hook（收尾点兜底）", (unsigned)VA_MapLoaderEntry);
+            LOG_WARN(kCat, "entry 0x%X prologue mismatch, skip entry hook (epilogue fallback)", (unsigned)VA_MapLoaderEntry);
         }
 
         // 3) 地图加载收尾点 hook（v3：0x40AA13，其余 11 表重载点）
