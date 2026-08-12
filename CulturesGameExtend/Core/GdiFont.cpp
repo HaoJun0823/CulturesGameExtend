@@ -263,26 +263,30 @@ void GdiFontRasterizer::BlitGlyph(uint8_t* fb, int pitch, int bpp,
             if (bpp == 2) {
                 uint16_t* p = (uint16_t*)(fb + (size_t)fy * pitch + (size_t)fx * 2);
                 if (idempotent) {
-                    // RGB565 通道容差（5/6/5 位 ≈ 8 位值 24/32/24）
+                    // ★09:5x 容差收极紧（1/1/1 ≈ 8 位 8）：浅色背景（引擎色 FFF5E1 米白）
+                    // 接近前景色时旧容差 3/3/3 误跳 → 字母整字缺失（用户实测 g 缺失）。
+                    // 已画过的像素=前景 565 量化，差 ≤1 仍能命中 → Tooltip 防累积保留。
                     uint8_t r, gg, b; From565(*p, r, gg, b);
                     int dr = (int)r - tr, dg = (int)gg - tg, db = (int)b - tb;
-                    if (dr > -4 && dr < 4 && dg > -5 && dg < 5 && db > -4 && db < 4) continue;
+                    if (dr > -2 && dr < 2 && dg > -2 && dg < 2 && db > -2 && db < 2) continue;
                 }
                 uint8_t r, gg, b; From565(*p, r, gg, b);
-                r = (uint8_t)(r + ((tr - r) * a) / 255);
-                gg = (uint8_t)(gg + ((tg - gg) * a) / 255);
-                b = (uint8_t)(b + ((tb - b) * a) / 255);
+                // ★09:4x 混合精度：单次 (src*(255-a)+dst*a+127)/255 舍入，替代旧逐步取整
+                // （旧公式中间多次截断 → 16bpp 下色阶误差累积 → 抗锯齿边缘锯齿感）
+                r = (uint8_t)((r * (255 - a) + tr * a + 127) / 255);
+                gg = (uint8_t)((gg * (255 - a) + tg * a + 127) / 255);
+                b = (uint8_t)((b * (255 - a) + tb * a + 127) / 255);
                 *p = To565((uint32_t)((r << 16) | (gg << 8) | b));
             } else if (bpp == 4) {
                 uint8_t* p = fb + (size_t)fy * pitch + (size_t)fx * 4;
                 if (idempotent) {
-                    // 32bpp 通道容差 24：抗锯齿中心墨迹≈纯前景色，重绘直接跳过（防累积）
+                    // ★09:5x 容差 16→8：浅色背景误跳（同 16bpp 收紧）
                     int dr = (int)p[2] - tr, dg = (int)p[1] - tg, db = (int)p[0] - tb;
-                    if (dr > -24 && dr < 24 && dg > -24 && dg < 24 && db > -24 && db < 24) continue;
+                    if (dr > -8 && dr < 8 && dg > -8 && dg < 8 && db > -8 && db < 8) continue;
                 }
-                p[0] = (uint8_t)(p[0] + ((tb - p[0]) * a) / 255);
-                p[1] = (uint8_t)(p[1] + ((tg - p[1]) * a) / 255);
-                p[2] = (uint8_t)(p[2] + ((tr - p[2]) * a) / 255);
+                p[0] = (uint8_t)((p[0] * (255 - a) + tb * a + 127) / 255);
+                p[1] = (uint8_t)((p[1] * (255 - a) + tg * a + 127) / 255);
+                p[2] = (uint8_t)((p[2] * (255 - a) + tr * a + 127) / 255);
                 p[3] = 0xFF;
             }
         }

@@ -65,6 +65,7 @@ public:
 
     int Height()  const { return m_height; }
     int Ascent()  const { return m_ascent; }
+    int Descent() const { return m_descent; }
 
     // ---------- 纯工具（静态，便于独立测试）----------
 
