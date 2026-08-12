@@ -484,21 +484,23 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
     int cellW = g_fontSize;
     int cellH = g_fontSize;
     int lineH = FontLineHeight(font);
-    // ★ 10:1x 半角/全角分类（西语半格）+ 基线对齐（西语基线齐）：
-    //   持久表面（Tooltip，ShouldSkipRepeat 命中即标记）用 09:40 墨迹居中 + X=0
-    //   （用户实测该组合 Tooltip 完全正常，偏移会推出引擎方框 → 叠加）；
-    //   普通表面用基线对齐 + TextXOffset（西语基线齐 + 其他文字水平校正）。
+    // ★★ 10:2x 水平系统偏差内置修正（与垂直 FontLineHeight 自动居中同理）：
+    //   引擎 x = 格子左边界，但原版字形有 xBearing（≈3px）→ 原版视觉位置 = x + bearing；
+    //   我们格内居中 (slotW-w)/2≈1px → 整体偏左 ~3px（用户实测：主界面与 Tooltip 都偏 3）。
+    //   内置 kBearingX=3 补回原版 bearing，**所有表面统一**（含持久 Tooltip）。
+    //   TextXOffset 仅作微调（默认 0）。
+    static const int kBearingX = 3;
     FbState* st = FindFbState(fb);
     int slotW = IsWideCodepoint(cp) ? cellW : (cellW / 2);
     int dx, dy;
     if (st->mode == 1) {
         int lh = lineH; if (lh < g->h) lh = g->h;
-        dx = x + (slotW - g->w) / 2;               // Tooltip：无 TextXOffset（出框 → 叠加）
-        dy = y + (lh - g->h) / 2 + g_textYOffset;  // Tooltip：墨迹居中（09:40 公式）
+        dx = x + (slotW - g->w) / 2 + kBearingX + g_textXOffset;
+        dy = y + (lh - g->h) / 2 + g_textYOffset;  // 持久表面：墨迹居中（09:40 公式）
     } else {
         int fontH = g_raster.Ascent() + g_raster.Descent();
         int centerOff = (lineH - fontH) / 2; if (centerOff < 0) centerOff = 0;
-        dx = x + (slotW - g->w) / 2 + g_textXOffset;
+        dx = x + (slotW - g->w) / 2 + kBearingX + g_textXOffset;
         dy = y + centerOff + g_raster.Ascent() + g->originY + g_textYOffset;
     }
     // ★ 10:1x 实际可写高度探测（per-fb 缓存）：防越界（+0x18 是宽-1）+ g 不缺失
