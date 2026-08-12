@@ -85,9 +85,12 @@ public:
     //   idempotent : 像素级幂等（1=推荐）：目标像素已≈前景色则跳过该像素，避免
     //     不清空表面上的跨帧重绘累积（LG4 tga 位图不透明直写无累积，GDI 抗锯齿
     //     alpha 混合会累积变浓；幂等 = 保留抗锯齿 + 同位置重绘像素不变）。
+    //   clipX/Y/W/H : 引擎 UI 框裁剪区（DrawContext +0x08..0x14）。W/H > 0 时启用，
+    //     字形像素超出该矩形的不画（引擎原行为 Rect::Intersect，修垂直列表最后一行溢出）。
     static void BlitGlyph(uint8_t* fb, int pitch, int bpp,
                           int dx, int dy, const Glyph* g, uint32_t color,
-                          int fbW, int fbH, bool idempotent = true);
+                          int fbW, int fbH, bool idempotent = true,
+                          int clipX = -1, int clipY = -1, int clipW = -1, int clipH = -1);
 
     // 把 RGBA 缓冲（白底文字）保存为 32bpp BMP（用于独立验证 / 自测落盘）。
     static bool SaveRGBAAsBMP(const char* path, int w, int h, const uint8_t* rgba);

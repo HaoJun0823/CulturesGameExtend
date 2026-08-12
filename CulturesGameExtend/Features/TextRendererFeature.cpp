@@ -523,8 +523,15 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
         st->mode = 1;
         return;
     }
+    // ★ 00:4x UI 框裁剪（引擎原行为）：完全在 clip 外的字形直接跳过；
+    //   部分在外的由 BlitGlyph 像素级裁剪（修垂直列表最后一行溢出）
+    if (clipW > 0 && clipH > 0) {
+        if (dx + g->w <= clipX || dx >= clipX + clipW ||
+            dy + g->h <= clipY || dy >= clipY + clipH)
+            return;
+    }
     ge::text::GdiFontRasterizer::BlitGlyph((uint8_t*)fb, pitchBytes, bpp, dx, dy, g, color, fbW, fbHReal,
-                                           g_blendIdempotent);
+                                           g_blendIdempotent, clipX, clipY, clipW, clipH);
 }
 
 // 字形层绘制 hook：sub_439610(__thiscall, ecx=字体对象; DrawContext=[ebp+0x0C]) 的 C 处理
@@ -539,6 +546,18 @@ static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx,
         LOG_INFO(kCat, "OnGlyphDraw active: dc=%p ch=0x%X x=%d y=%d size=%d cfgColor=0x%X engColor=0x%X font=%p",
                  dc, (unsigned)ch, x, y, g_fontSize, (unsigned)g_textColor,
                  (unsigned)EngineColor(colorCtx), font);
+    }
+    // ★ 00:4x hover 诊断（限次，纯 hex）：验证 hover 重绘时引擎颜色是否变亮（×1.5）
+    {
+        static int s_hoverDbg = 0;
+        if (s_hoverDbg < 16) {
+            s_hoverDbg++;
+            const uint8_t* c = colorCtx;
+            LOG_INFO(kCat, "HoverDbg[%d]: cp=U+%04X x=%d y=%d col=[%02X %02X %02X %02X %02X %02X] ctx=%p",
+                     s_hoverDbg, (unsigned)(ch & 0xFF), x, y,
+                     c ? c[0] : 0, c ? c[1] : 0, c ? c[2] : 0, c ? c[3] : 0,
+                     c ? c[4] : 0, c ? c[5] : 0, (void*)colorCtx);
+        }
     }
     if (ch < 0x80) {
         // ASCII：单字节即完整码点，直接 GDI 渲染（用户拍板全接管）

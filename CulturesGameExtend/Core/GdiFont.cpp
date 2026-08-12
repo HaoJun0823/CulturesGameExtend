@@ -249,19 +249,25 @@ std::vector<uint32_t> GdiFontRasterizer::DecodeUtf8(const char* s, size_t n) {
 
 void GdiFontRasterizer::BlitGlyph(uint8_t* fb, int pitch, int bpp,
                                   int dx, int dy, const Glyph* g, uint32_t color,
-                                  int fbW, int fbH, bool idempotent) {
+                                  int fbW, int fbH, bool idempotent,
+                                  int clipX, int clipY, int clipW, int clipH) {
     if (!fb || !g || g->w == 0 || g->h == 0) return;
     if (fbW <= 0 || fbH <= 0) return;
+    // ★ 00:4x 引擎 UI 框裁剪（原行为 Rect::Intersect）：clipW/H > 0 时字形像素超出该矩形不画
+    //   （修垂直列表最后一行溢出——原版/LG4 都按 clip 裁，我们之前只按表面边界裁 → 溢出可见）
+    bool doClip = (clipW > 0 && clipH > 0);
     uint8_t tr = (uint8_t)((color >> 16) & 0xFF);
     uint8_t tg = (uint8_t)((color >> 8)  & 0xFF);
     uint8_t tb = (uint8_t)( color        & 0xFF);
     for (int j = 0; j < g->h; ++j) {
         int fy = dy + j;
         if (fy < 0 || fy >= fbH) continue;   // ★ 上下边界裁剪（防越界写）
+        if (doClip && (fy < clipY || fy >= clipY + clipH)) continue;   // ★ UI 框上下裁剪
         const uint8_t* srcRow = g->alpha.data() + (size_t)j * g->pitch;
         for (int i = 0; i < g->w; ++i) {
             int fx = dx + i;
             if (fx < 0 || fx >= fbW) continue; // ★ 左右边界裁剪（防越界写）
+            if (doClip && (fx < clipX || fx >= clipX + clipW)) continue; // ★ UI 框左右裁剪
             int a = srcRow[i];
             if (a == 0) continue;
             if (bpp == 2) {
