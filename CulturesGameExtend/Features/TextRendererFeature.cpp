@@ -283,9 +283,12 @@ static uintptr_t g_thunkWidth = 0;   // sub_439633 跳板
 //   Tooltip 画多 pass 时各 pass 颜色不同（阴影/描边深色 + 主体白色），旧代码统一用
 //   g_textColor(白) → 两遍白色叠加 → 残留重影。改用引擎颜色 → 还原原版颜色/阴影，重影消失。
 static bool g_useEngineColor = true;
-static bool g_wordSplitPatch = false;  // ★23:0x 默认关（弃用）：补丁① 让词扫描单字节化 → GBK 字拆碎 →
-                                       //   富文本每字节后空格宽 → 分散；且 0x4CA612 修分散的 hook 点不安全（消失）。
-                                       //   正确组合 = 关补丁① + WordColStub（sub_4E21B7 CJK 单码点词）+ OverflowStub
+static bool g_wordSplitPatch = false;  // ★23:4x 最终定案：**WordSplitPatch=1 启用中**（ini 控制，代码默认 false 防缺键）。
+                                       //   语义（23:34 用户实测正常）：补丁①(0xD053B) 让 sub_4CFE93 词扫描单字节化
+                                       //   → 富文本词=单字节（GBK 字拆碎）→ 每词不超宽 → 长文本完整显示；
+                                       //   副作用"每字节后空格宽"由 0x4CA612 NOP 消除 → 中文紧凑。
+                                       //   ⚠ 旧弃用原因（10:41 justify 分散）已随 NOP 组合解决，勿再回退到 0
+                                       //   （WordSplitPatch=0 → 富文本词=整段 → 长文本超宽溢出/消失，用户 23:32 实测）。
 static bool g_blendIdempotent = true;  // BlitGlyph 像素级幂等（防不清空表面跨帧累积）
 static uint32_t EngineColor(const uint8_t* c) {
     if (!c || !g_useEngineColor) return g_textColor;
@@ -418,7 +421,8 @@ static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t
     int clipH = *(int*)((uintptr_t)self + 0x14);
     // ★ 2026-08-12 07:5x 修正：pitch_px 是帧缓冲真实行宽（如 800），clip 只是绘制子区域
     //   （如 280x20）。用 clip 推 fbW 会把超出子区域的字形裁掉（"字被吃掉"）。
-    //   fbW 必须用 pitch_px；fbH 候选 = +0x18（先 dump 验证），回退 600。
+    //   fbW 必须用 pitch_px；fbH 上界用 +0x18（★09:5x 定案：+0x18 = clip.w-1 = **宽-1 非高度**！
+    //   全屏 800x600 → 799；按它当高度裁剪会越界 → 真实高度靠 ProbeFbHeight 探测，见下）。
     int fbW = pitch_px;
     int fbH = *(int*)((uintptr_t)self + 0x18);
     if (fbH <= 0 || fbH > 4096) fbH = 600;
@@ -741,6 +745,8 @@ static int FixOverflowWord(char* buf, int curX, int lineW, char** strPtr, int wo
 //   ★ 11:57 用户反馈"缩进很多" → 改配置控制（ContainerLeftFix，默认 0=关，先修换行）。
 static int g_containerLeftFix = 0;   // 配置 ContainerLeftFix
 
+// ★ 已废弃：CaptureText 随 DrawTextStub 停用（20:2x 曾有 [ebp+0x20] 越界读崩溃史：
+//   Game.exe.34112.dmp EIP 跳 0xCE500C50 = 栈破坏 → 该入口读法永久弃用）。
 // 当前正在排版的完整文本（sub_4E21B7 入口捕获，供 Meas/Wrap 日志对照界面）
 static char g_curText[160] = {0};
 
@@ -819,8 +825,8 @@ static void WrapLog(int xBefore, int yBefore) {
              n, g_curText, xBefore, yBefore, buf);
 }
 
-// sub_40ECF9 绘制入口 hook（0x40ECFC，push ecx; cmp [ebp+0x18],0 = 5 字节）：
-// 捕获正在绘制的字符串（[ebp+0x18] = 词缓冲 0x569A38 或完整文本——函数参数，可靠）
+// ★ 已废弃（20:5x 起不再安装，用户放弃日志诊断"看不懂"）：sub_40ECF9 绘制入口捕获文本
+//   （[ebp+0x18] 字符串参数）。保留作参考；g_curText 不再更新（日志 text='' 属预期）。
 extern "C" void __declspec(naked) DrawTextStub() {
     __asm {
         pushad
@@ -853,17 +859,22 @@ extern "C" void __declspec(naked) WrapStub() {
 }
 
 // ===================================================================
-// ★ 2026-08-12 19:5x 富文本"词后空格"修复（hook 0x4CA556，0x4CA3C6 排版函数内）
+// ★ 富文本"词后空格"修复（最终方案 23:4x = **NOP 0x4CA612**，见 InstallHooks）
 //   问题（用户实测 19:43）：WordSplitPatch=1 后所有内容完整但"你    好     世     界"分散。
-//   机制（反汇编定案）：0x4CA3C6（富文本排版）遍历词 token，**每个词后固定加空格宽**
-//   （0x4CA54F push 0x69 → sub_439633('i'宽=9) → 0x4CA556 add [esi+0x38],eax）。
-//   原版英文词间距正常；中文每字=词（补丁①/WordColStub）→ 每字后 +9px → 字距 14+9=23px
-//   （= 11:41 LayMeas wordW=23 之谜）→ "分散/表格"。
-//   修复：hook 0x4CA556（add [esi+0x38],eax; mov eax,[ebp-4] = 6 字节），
-//   **CJK 词（[edi+4] 首字节 ≥0x80）→ 空格宽=0**（中文紧凑连续）；ASCII 词保持原样。
-//   寄存器：esi=排版上下文(+0x38=x)、edi=当前词 token(+4=词字符串)、ebp=[ebp-4]=词宽。
+//   机制（IDA 反编译 sub_4CA3C6 定案）：富文本排版遍历词 token，**每个词后固定加空格宽**
+//   （0x4CA60D push 0x69 → sub_439633('i'宽=9) → 0x4CA612 add [esi+0x38],eax，x += 空格宽）。
+//   原版英文词间距正常；补丁① 让词=单字节（SpaceHex 实测：词缓冲 = 单字节 GBK 首字节+NUL，
+//   如 E8 00）→ 每个字节后 +9px → "分散/表格"（= 11:41 LayMeas wordW=23 之谜的成因之一）。
+//   ★ 演进史（勿再走回头路）：
+//     - 0x4CA556（case 3 图片 token）E9 hook：从未触发（任务界面走 case 2）→ 无效；
+//     - 0x4CA612（case 2 词 token）E9 hook：连"纯执行原指令"的 stub 都导致**文字全消失**
+//       （用户 22:38-23:01 四版实测；机制未明，推测 E9 跳转破坏某状态）→ 弃用；
+//     - ★ 0x4CA612 **3 字节 NOP**（add -> 90 90 90）：不跳转/不碰寄存器/栈 → 安全，
+//       x += 空格宽 取消 → 中文紧凑（用户 23:41 实测本版正常）。sub_4C9DAD 的 `x-=9`
+//       回退在左对齐（this+21=0）时无害。
 // ===================================================================
-// 富文本词 token 内容输出（0x4CA612 路径）——hex dump 确认词缓冲真实编码（GBK vs UTF-8）
+// ★ 已废弃诊断（不再被调用，保留作参考）：SpaceLog 曾输出富文本词 token 内容 hex，
+//   证实词=单字节 GBK 首字节（E8 00 / E5 00）→ 见 2026-08-12 记忆 SpaceHex 结论。
 static void SpaceLog(void* token) {
     static int n = 0;
     if (n >= 8) return;
@@ -880,11 +891,12 @@ static void SpaceLog(void* token) {
              h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
 }
 
+// ★ 已废弃（23:4x）：0x4CA612 改 NOP 后本 stub 不再安装。保留仅为演进史参考——
+//   22:5x 二分实验证明"纯执行原指令"的 E9 stub 也导致文字消失 → hook 点不可用 E9 方案。
 extern "C" void __declspec(naked) SpaceFixStub() {
     __asm {
-        // ★★ 22:5x 二分实验：纯执行原指令（不 pushad / 不 LOG / 不改 eax）——
-        //   测 0x4CA612 hook 点本身是否安全。若文字恢复 → hook 点 OK，问题在
-        //   pushad/SpaceLog/eax 修改；若仍消失 → 0x4CA612 不可安全 hook（换策略）。
+        // 22:5x 二分实验：纯执行原指令（不 pushad / 不 LOG / 不改 eax）——
+        //   实测仍消失 → 0x4CA612 不可安全 E9 hook（用户 23:01）→ 改用 NOP（23:34）
         add  dword ptr [esi + 0x38], eax   // 原指令：x += 空格宽（原样）
         mov  eax, dword ptr [ebp - 8]      // 原指令：v33
         mov  eax, 4CA618h                  // 回 0x4CA618（jmp 0x4CA55C）
@@ -899,7 +911,7 @@ extern "C" void __declspec(naked) LayoutEntryStub() {
     __asm {
         pushad
         // ★ 20:2x 崩溃根因：sub_4E21B7 参数可能 <7，[ebp+0x20] 越界读 → 栈破坏（EIP 跳 0xCE500C50）
-        //   CaptureText 已禁用；改用 DrawTextStub（hook sub_40ECF9 绘制入口，[ebp+0x18] 可靠）
+        //   CaptureText/DrawTextStub 均已停用（20:5x）；这里只做 FixLayoutXStart（容器左修复）
         // FixLayoutXStart(ctx=[ebp+8], lineW=[ebp+14], origX=[ebp+0C])
         mov  eax, [ebp + 0x0C]
         push eax                  // origX
@@ -1048,12 +1060,13 @@ static void InstallHooks(uintptr_t base) {
     } else LOG_WARN(kCat, "InstallHooks: layMeas bytes mismatch (skip)");
 }
 
-// ★ 2026-08-12 分词补丁（LG4/LG0 同款思路，只打补丁①）——**已弃用，默认关闭**：
-//   ⚠ 弃用原因（10:41 用户实测）：补丁①(RVA 0xD053B 词扫描单字符化)导致引擎对长段落
-//   （如 briefings.txt 任务简报）的两端对齐(justify)按"词间距"分散时词=1字符 →
-//   每字符均匀分散 = 文本"居中分散对齐"。Tooltip 叠加早已定案为偏移问题（与分词补丁无关）。
-//   保留代码仅作参考/应急；WordSplitPatch 默认 0（不开）。
+// ★ 2026-08-12 分词补丁（LG4/LG0 同款思路，只打补丁① RVA 0xD053B）
+//   ★ 23:4x 现状：**WordSplitPatch=1 启用中**（最终方案的一部分）——补丁① 让 sub_4CFE93
+//   词扫描单字节化 → 富文本词=单字节 → 不超宽 → 长文本完整显示（用户 23:41 实测正常）。
+//   副作用"每字节后空格宽=9px → 分散"由 0x4CA612 NOP 消除 → 中文紧凑。
+//   ⚠ 勿回退到 0：词=整段 → 富文本长文本超宽溢出/消失（用户 23:32 实测）。
 //   ★ 补丁②(RVA 0xE2251) 在 Saga 上 NOP 必死循环（sub_4E21B7 外层不自行推进指针），不可用。
+//   ★ 历史：10:41 曾因"简报 justify 分散"弃用（词=1字符 → 每字均匀分散），后随 NOP 组合解决。
 static void InstallWordSplitPatches(uintptr_t base) {
     const uint8_t nops[2] = { 0x90, 0x90 };
     struct Pt { uint32_t rva; uint8_t b0, b1; const char* what; };
