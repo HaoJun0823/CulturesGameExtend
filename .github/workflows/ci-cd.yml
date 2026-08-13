@@ -35,39 +35,19 @@ jobs:
 
       - name: 添加 MSBuild 到 PATH
         uses: microsoft/setup-msbuild@v2
+        # 注意：windows-2022 镜像没有 v141_xp 工具集
+        # 项目默认使用 v141_xp (XP 兼容)，但 CI 使用 v142 (VS 2019) 构建
+        # 如需 XP 兼容，请在本地用 VS 2017 编译
 
-      - name: 安装 v141_xp 工具集
+      - name: 设置工具集版本 (v142 = VS 2019)
         shell: pwsh
         run: |
-          # 检查 v141_xp 是否已安装
-          $testPath = "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\vc\v141"
-          if (Test-Path "$testPath") {
-            Write-Host "v141_xp 工具集已存在，跳过安装"
-          } else {
-            Write-Host "正在安装 v141_xp 工具集..."
-            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            $vsPath = & $vsWhere -latest -property installationPath
-            $setupExe = "$vsPath\Installer\setup.exe"
-            # 安装 Windows XP 支持 for C++ 组件
-            & $setupExe modify --installPath "$vsPath" `
-              --add Microsoft.VisualStudio.Component.VC.v141.xp `
-              --quiet --norestart --wait
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::warning::v141_xp 安装失败，将使用 v142 作为回退工具集"
-              echo "USE_FALLBACK_TOOLSET=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            } else {
-              Write-Host "v141_xp 工具集安装完成"
-            }
-          }
-      
-      - name: 设置工具集版本环境变量
-        shell: pwsh
-        run: |
-          if ("$env:USE_FALLBACK_TOOLSET" -eq "true") {
-            echo "TOOLSET=v142" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            echo "TOOLSET=v141_xp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          }
+          echo "TOOLSET=v142" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # windows-2022 没有 SDK 8.1，使用最新 SDK
+          echo "WINSDK=10.0" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PlatformToolset: v142 (VS 2019, 预装于 windows-2022)"
+          Write-Host "WindowsSDK: 10.0 (runner 默认)"
+          Write-Host "注: 项目原生 v141_xp + SDK 8.1 (XP 兼容) 需本地 VS 2017 编译"
 
       - name: 从 Git 标签提取版本号
         shell: pwsh
@@ -81,12 +61,11 @@ jobs:
       - name: 构建 CulturesGameExtend (Release)
         shell: pwsh
         run: |
-          $toolset = if ($env:TOOLSET) { $env:TOOLSET } else { "v141_xp" }
-          Write-Host "Using PlatformToolset: $toolset"
           msbuild CulturesGameExtend\CulturesGameExtend.vcxproj `
             /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
             /p:Platform=${{ env.BUILD_PLATFORM }} `
-            "/p:PlatformToolset=$toolset" `
+            "/p:PlatformToolset=$env:TOOLSET" `
+            "/p:WindowsTargetPlatformVersion=$env:WINSDK" `
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
             /p:UseEnv=true `
             /m
@@ -95,12 +74,11 @@ jobs:
       - name: 构建 CulturesProxyDLL (Release)
         shell: pwsh
         run: |
-          $toolset = if ($env:TOOLSET) { $env:TOOLSET } else { "v141_xp" }
-          Write-Host "Using PlatformToolset: $toolset"
           msbuild CulturesProxyDLL\CulturesProxyDLL.vcxproj `
             /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
             /p:Platform=${{ env.BUILD_PLATFORM }} `
-            "/p:PlatformToolset=$toolset" `
+            "/p:PlatformToolset=$env:TOOLSET" `
+            "/p:WindowsTargetPlatformVersion=$env:WINSDK" `
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
             /p:UseEnv=true `
             /m
