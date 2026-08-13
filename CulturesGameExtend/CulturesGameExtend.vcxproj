@@ -67,7 +67,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;CULTURESGAMEEXTEND_EXPORTS;_WINDOWS;_USRDLL;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;CULTURESGAMEEXTEND_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -87,14 +87,10 @@
   </ItemGroup>
   <Target Name="CopyDeployContent" AfterTargets="Build">
     <!-- %(RecursiveDir) 相对 ..\Resource\，保留 plugins\config\... 结构 -->
-    <Copy SourceFiles="@(DeployContent)"
-          DestinationFiles="@(DeployContent->'$(OutDir)%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(DeployContent)" DestinationFiles="@(DeployContent->'$(OutDir)%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
     <MakeDir Directories="$(OutDir)plugins" />
-    <Copy SourceFiles="$(OutDir)$(TargetName)$(TargetExt)"
-          DestinationFiles="$(OutDir)plugins\$(TargetName)$(TargetExt)"
-          SkipUnchangedFiles="true" />
-    <Message Importance="high" Text="Deployed Resource/ -> $(OutDir)" />
+    <Copy SourceFiles="$(OutDir)$(TargetName)$(TargetExt)" DestinationFiles="$(OutDir)plugins\$(TargetName)$(TargetExt)" SkipUnchangedFiles="true" />
+    <Message Importance="high" Text="Deployed Resource/ -&gt; $(OutDir)" />
   </Target>
   <ItemGroup>
     <ClInclude Include="framework.h" />

@@ -1,3 +1,4 @@
+#pragma region Glyph render probe
 #include <windows.h>
 #include <stdio.h>
 int main(){
@@ -23,3 +24,5 @@ int main(){
     printf("U+7E41: nonwhite=%d bbox=(%d,%d)-(%d,%d)\n",nonwhite,minx,miny,maxx,maxy);
     return 0;
 }
+
+#pragma endregion

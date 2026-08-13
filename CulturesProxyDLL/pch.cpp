@@ -1,5 +1,9 @@
-﻿// pch.cpp: 与预编译标头对应的源文件
+// pch.cpp: Source file corresponding to the precompiled header
+
+// pch.cpp: 与预编译标头对应的源文件
+
+#pragma region Precompiled header source
+// This source file is required when using precompiled headers, for compilation to succeed.
+#pragma endregion
 
 #include "pch.h"
-
-// 当使用预编译的头时，需要使用此源文件，编译才能成功。

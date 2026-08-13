@@ -1,3 +1,4 @@
+#pragma region Glyph bounding-box probe (baseline align)
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -5,6 +6,7 @@ int main(){
     HDC dc=CreateCompatibleDC(NULL);
     int heightPx=48;
     // 顺序：先 DIB，后字体（与 probe 一致）
+    // Order: DIB first, then font (consistent with probe)
     int cellW=heightPx*2+6, cellH=heightPx+24;
     BITMAPINFOHEADER bi={}; bi.biSize=sizeof(bi); bi.biWidth=cellW; bi.biHeight=-cellH; bi.biPlanes=1; bi.biBitCount=32; bi.biCompression=BI_RGB;
     void* bits=0; HBITMAP bmp=CreateDIBSection(dc,(BITMAPINFO*)&bi,DIB_RGB_COLORS,&bits,0,0);
@@ -14,9 +16,13 @@ int main(){
     SelectObject(dc,f);
     TEXTMETRICW tm={}; GetTextMetricsW(dc,&tm);
     int ascent=tm.tmAscent, descent=tm.tmDescent;
-    int baseY=ascent+3; // 基线 y（顶部留 3 余量）
-    cellH=ascent+descent+6; // 重算画布高
+    int baseY=ascent+3;
+// 基线 y（顶部留 3 余量）
+// baseline y (3px top margin)
+    cellH=ascent+descent+6;
     printf("ascent=%d descent=%d cellH=%d baseY=%d\n",ascent,descent,cellH,baseY);
+// 重算画布高
+// recompute canvas height
     SetBkMode(dc,OPAQUE); SetBkColor(dc,RGB(255,255,255)); SetTextColor(dc,RGB(0,0,0));
     SetTextAlign(dc, TA_LEFT|TA_BASELINE);
     memset(bits,0xFF,(size_t)cellW*cellH*4);
@@ -28,3 +34,4 @@ int main(){
     printf("繁: nonwhite=%d bbox=(%d,%d)-(%d,%d) h=%d\n",nonwhite,minx,miny,maxx,maxy,maxy-miny+1);
     return 0;
 }
+#pragma endregion

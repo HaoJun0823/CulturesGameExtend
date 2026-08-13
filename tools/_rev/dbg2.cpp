@@ -1,3 +1,4 @@
+#pragma region Glyph bounding-box probe
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,14 +18,17 @@ int main(){
     SelectObject(dc,bmp);
     SetBkMode(dc,OPAQUE); SetBkColor(dc,RGB(255,255,255)); SetTextColor(dc,RGB(0,0,0));
     memset(bits,0xFF,(size_t)cellW*cellH*4);
-    const wchar_t wc=0x7E41; // 繁
+    const wchar_t wc=0x7E41;
+// 繁
+// '繁' (U+7E41, CJK ideograph)
     BOOL r=TextOutW(dc,3,baseY,&wc,1);
     printf("TextOut ret=%d err=%lu\n",r,GetLastError());
     unsigned char* p=(unsigned char*)bits; int nonwhite=0,minx=cellW,miny=cellH,maxx=-1,maxy=-1;
     for(int y=0;y<cellH;y++)for(int x=0;x<cellW;x++){unsigned char*px=p+(y*cellW+x)*4; if(!(px[0]==255&&px[1]==255&&px[2]==255)){nonwhite++;if(x<minx)minx=x;if(y<miny)miny=y;if(x>maxx)maxx=x;if(y>maxy)maxy=y;}}
     printf("繁: nonwhite=%d bbox=(%d,%d)-(%d,%d)\n",nonwhite,minx,miny,maxx,maxy);
-    // also ASCII 'A'
     memset(bits,0xFF,(size_t)cellW*cellH*4);
+    // also ASCII 'A'
+    // also ASCII 'A'
     r=TextOutW(dc,3,baseY,L"A",1);
     printf("TextOut A ret=%d err=%lu\n",r,GetLastError());
     nonwhite=0;minx=cellW;miny=cellH;maxx=-1;maxy=-1;
@@ -32,3 +36,4 @@ int main(){
     printf("A: nonwhite=%d bbox=(%d,%d)-(%d,%d)\n",nonwhite,minx,miny,maxx,maxy);
     return 0;
 }
+#pragma endregion

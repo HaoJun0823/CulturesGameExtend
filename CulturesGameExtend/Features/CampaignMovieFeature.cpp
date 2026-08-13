@@ -58,6 +58,66 @@
 //   [CampaignMovie]
 //   Enabled = 1
 // ===================================================================
+// CampaignMovieFeature.cpp
+// ===================================================================
+// [CampaignMovie]
+// Play the intro movie intro00.mpg before Cultures II (campaign 1) enters its first level (node 10).
+//
+// Background (reverse-engineering conclusion):
+//   The intro movie is decided and played in-place by sub_40306E (0x40306E) (its sole call site
+//   is 0x40235D). That function matches the "current map"'s campaignId / nodeId against hard-coded
+//   literal strings:
+//     campaign 2 + node 10 -> "intro01" (Nordland)
+//     campaign 3 + node 10 -> "intro02" (The Eighth Wonder of the World)
+//     campaign 4 + node 10 -> "intro03" (Saga)
+//   **The campaign-1 (Cultures II) branch is simply missing** — the vanilla exe contains no
+//   "intro00" literal at all; Cultures II was never officially activated with an intro movie.
+//
+//   Function flow (disassembly confirmed 0x40306E..0x403226):
+//     - Entry block (0x40309A..0x4030D1): uses global [0x569990] = current map object, calls
+//       0x4e0e4b/0x4e0e38 to check whether this map defines an intro movie (intro name is looked up
+//       in the map container [mapobj+4] by key 0x4fe49c; hit => buf[0]=1).
+//       **This is the real channel other campaigns use to play intros during normal play, and
+//       +0x2c is always 0 here**, so the old assumption "+0x2c==1 to play" is wrong — normal play
+//       (Cultures III etc.) also runs with mode=0.
+//     - The hard-coded +0x2c==1 branch (0x4030DE..0x403184): only when +0x2c==1 does it load edi
+//       with the map record (0x41086f (g_pCampaignStaticDataMgr, g_pGameStartRequest+0x30)) and
+//       match campaign 2/3/4. The normal-play path doesn't enter this branch (mode is always 0).
+//     - Convergence point 0x403184: cmp byte [esi],bl ; je 0x403226. Note: under the mode=0 path
+//       edi = 0x4fe49c (a string literal), **not a map pointer**; only the +0x2c==1 path sets edi
+//       to the map record. Therefore the stub must never read edi at the convergence point.
+//       [0x569990] is actually the **command manager** (the this of channel-1 and the play block
+//       0x4031E6), not the "current map object"; the structure that truly holds campaign/node is the
+//       map record (returned by 0x41086f (g_pCampaignStaticDataMgr, &g_pGameStartRequest+0x30),
+//       +0x124=campaign / +0x128=node). This query is __thiscall + retn 4 (callee clears stack).
+//   Plan: overwrite the 8 bytes at 0x403184 with E9 -> IntroC2Stub (+3 NOP). The stub first replays
+//   the original convergence (buf[0]!=0 -> play directly); when buf[0]==0 it calls findmap to test
+//   campaign==1 && node==10, and on hit does strcpy(buf+1,"intro00") then jumps to the play block
+//   0x40318C. All global dereferences have NULL guards (no record found -> no play, never crash).
+//   Note: _strcpy(0x4E5400) is standard cdecl, **push Source first, then Destination** (the two
+//   call sites at vanilla 0x403127/0x4030BB are isomorphic); writing the order reversed would write
+//   into read-only memory.
+//
+// Plan: rewrite the 8 bytes (cmp/je) at 0x403184 into E9 -> this DLL's IntroC2Stub (+3 NOP to pad),
+// and add the campaign-1 branch inside the stub:
+//   - campaignId==1 && nodeId==10 -> strcpy(buf+1,"intro00"); buf[0]=1; then jump to play block 0x40318C;
+//   - otherwise exactly replay the original cmp/je: empty buf -> jump 0x403226, else -> 0x40318C.
+// This makes zero change to every other campaign's behavior (their intros are still handled by the
+// original three branches), and Cultures II gets its intro patched in even if the map's bit1 is not
+// set (more permissive than vanilla).
+//
+// The "intro00" literal is provided by this DLL (the exe has no such string). The play path reuses
+// the engine's existing logic: datax\FMV\%%s\%s.mpg -> datax\FMV\Eng\intro00.mpg (intro00.mpg already
+// exists on disk).
+//
+// Ending movie (seq_0000.mpg): the engine assembles it in sub_41FB7A using a per-campaign record
+// field (wsprintf(..,"seq_%4.4d",[esi+4])). Cultures II's movie ID has already been changed to 0,
+// so the ending needs no code patch — it is solved at the data layer.
+//
+// Config (plugins/config/CulturesGameExtend_Game.ini):
+//   [CampaignMovie]
+//   Enabled = 1
+// ===================================================================
 #include "pch.h"
 #include "Core/Feature.h"
 #include "Core/IniConfig.h"
@@ -68,39 +128,102 @@
 #include <cstring>
 #include <vector>
 
+
 namespace fe_movie {
+
 
 const char* kName = "CampaignMovie";
 const char* kCat  = "[CampaignMovie]";
 
 // ---- hook 点（RVA = VA - 0x400000）----
-constexpr uintptr_t R_IntroConv = 0x03184;   // 0x403184  cmp [esi],bl ; je 0x403226 (8 字节)
-constexpr uintptr_t R_PlayBlk  = 0x0318C;   // 0x40318C  播放块起点
-constexpr uintptr_t R_SkipBlk  = 0x03226;   // 0x403226  不播分支
-constexpr uintptr_t R_StrCpy   = 0x0E5400;  // 0x4E5400  strcpy(dst,src)，原版用于拷 intro 串
-constexpr uintptr_t R_GameStart = 0x10F804; // 0x50F804  g_pGameStartRequest（RVA=VA-0x400000=0x10F804）；+0x2c = 开场触发标志
-constexpr uintptr_t R_Mgr       = 0x110BFC; // 0x510BFC  g_pCampaignStaticDataMgr 指针变量
-constexpr uintptr_t R_FindMap  = 0x01086F; // 0x41086F  map 记录查询(__thiscall: ecx=mgr, arg=&req+0x30)
+
+#pragma region Hook Constants, Verify Bytes & Strings
+// ---- hook site (RVA = VA - 0x400000) ----
+constexpr uintptr_t R_IntroConv = 0x03184;
+// 0x403184  cmp [esi],bl ; je 0x403226 (8 字节)
+// 0x403184  cmp [esi],bl ; je 0x403226 (8 bytes)
+constexpr uintptr_t R_PlayBlk  = 0x0318C;
+constexpr uintptr_t R_SkipBlk  = 0x03226;
+// 0x40318C  播放块起点
+// 0x40318C  play-block start
+constexpr uintptr_t R_StrCpy   = 0x0E5400;
+constexpr uintptr_t R_GameStart = 0x10F804;
+// 0x403226  不播分支
+// 0x403226  skip-branch
+constexpr uintptr_t R_Mgr       = 0x110BFC;
+constexpr uintptr_t R_FindMap  = 0x01086F;
+// 0x4E5400  strcpy(dst,src)，原版用于拷 intro 串
+// 0x4E5400  strcpy(dst,src), used by vanilla to copy intro string
+static const uint8_t kConvBytes[8] = {
+    0x38, 0x1e,
+// 0x50F804  g_pGameStartRequest（RVA=VA-0x400000=0x10F804）；+0x2c = 开场触发标志
+// 0x50F804  g_pGameStartRequest (RVA=VA-0x400000=0x10F804); +0x2c = intro trigger flag
+    0x0f, 0x84, 0x9a, 0x00, 0x00, 0x00
+};
+// 0x510BFC  g_pCampaignStaticDataMgr 指针变量
+// 0x510BFC  g_pCampaignStaticDataMgr pointer variable
+static const char kIntro00[] = "intro00";
+static void* p_play   = nullptr;
+// 0x41086F  map 记录查询(__thiscall: ecx=mgr, arg=&req+0x30)
+// 0x41086F  map-record lookup (__thiscall: ecx=mgr, arg=&req+0x30)
+static void* p_skip   = nullptr;
                                            // 注意：这里是 RVA！曾误写 VA 0x041086F → p_findmap=0x81086F
                                            // 跳 image 外堆区 → AV 崩溃（2026-08-11 已修）
 
 // ---- 校验原 8 字节 ----
-static const uint8_t kConvBytes[8] = {
-    0x38, 0x1e,             // cmp byte ptr [esi], bl
-    0x0f, 0x84, 0x9a, 0x00, 0x00, 0x00  // je 0x403226
-};
+                                           // NOTE: this is an RVA! Once wrongly written as VA 0x041086F -> p_findmap=0x81086F
+                                           // jumped into heap outside the image -> AV crash (fixed 2026-08-11)
+
+// ---- verify the original 8 bytes ----
+static void* p_strcpy = nullptr;
+static void* p_gstart = nullptr;
+// cmp byte ptr [esi], bl
+// cmp byte ptr [esi], bl
+static void* p_mgr    = nullptr;
+static void* p_findmap= nullptr;
+// je 0x403226
+// je 0x403226
+static void* p_dbg    = nullptr;
+static unsigned char g_dbgOn    = 1;
 
 // ---- DLL 提供的字面串（exe 无 "intro00"）----
-static const char kIntro00[] = "intro00";
+
+// ---- literal string provided by this DLL (exe has no "intro00") ----
+static unsigned      g_dbgCount = 0;
 
 // ---- 运行期绑定的间接跳转目标（免手算 rel32）----
-static void* p_play   = nullptr;   // 0x40318C
-static void* p_skip   = nullptr;   // 0x403226
-static void* p_strcpy = nullptr;   // 0x4E5400
-static void* p_gstart = nullptr;   // 0x50F804  g_pGameStartRequest 指针
-static void* p_mgr    = nullptr;   // 0x510BFC  g_pCampaignStaticDataMgr 指针变量
-static void* p_findmap= nullptr;   // 0x41086F  map 记录查询（__thiscall）
-static void* p_dbg    = nullptr;   // DebugIntro 诊断函数地址
+#pragma endregion
+
+#pragma region Runtime State & Debug
+// ---- runtime-bound indirect jump targets (no hand-computed rel32) ----
+static void*         g_maprec   = nullptr;
+// 0x40318C
+// 0x40318C
+static DWORD         g_dbgMode  = 0;
+extern "C" void __cdecl DebugIntro(DWORD buf0, DWORD mode, DWORD rawMapobj,
+// 0x403226
+// 0x403226
+                                   DWORD fmcamp, DWORD fmnode, DWORD fmflag) {
+    if (!g_dbgOn) return;
+// 0x4E5400
+// 0x4E5400
+    if (g_dbgCount++ > 40) return;
+    LOG_INFO(kCat, "[dbg] buf[0]=%u mode(+0x2c)=%u raw_mapobj=0x%X | findmap: camp=%u node=%u flags=0x%X bit1=%u",
+// 0x50F804  g_pGameStartRequest 指针
+// 0x50F804  g_pGameStartRequest pointer
+             (unsigned)buf0, (unsigned)mode, (unsigned)rawMapobj,
+             (unsigned)fmcamp, (unsigned)fmnode, (unsigned)fmflag, (unsigned)((fmflag >> 1) & 1));
+// 0x510BFC  g_pCampaignStaticDataMgr 指针变量
+// 0x510BFC  g_pCampaignStaticDataMgr pointer variable
+}
+__declspec(naked) void IntroC2Stub() {
+// 0x41086F  map 记录查询（__thiscall）
+// 0x41086F  map-record lookup (__thiscall)
+    __asm {
+        pushad
+// DebugIntro 诊断函数地址
+// DebugIntro diagnostic function address
+        pushfd
 
 // ===================================================================
 // 诊断：把 stub 到达时的真实上下文写日志。
@@ -110,19 +233,38 @@ static void* p_dbg    = nullptr;   // DebugIntro 诊断函数地址
 // 诊断打印：buf[0] / mode(+0x2c) / 命令管理器 / findmap 得到的 camp/node/flag。
 // 诊断由 [CampaignMovie] Debug 控制（默认开）。
 // ===================================================================
-static unsigned char g_dbgOn    = 1;
-static unsigned      g_dbgCount = 0;
-static void*         g_maprec   = nullptr;   // 0x41086f 返回的地图记录
-static DWORD         g_dbgMode  = 0;         // 诊断用：g_pGameStartRequest->+0x2c（NULL 防护后）
 
-extern "C" void __cdecl DebugIntro(DWORD buf0, DWORD mode, DWORD rawMapobj,
-                                   DWORD fmcamp, DWORD fmnode, DWORD fmflag) {
-    if (!g_dbgOn) return;
-    if (g_dbgCount++ > 40) return;            // 防日志爆炸
-    LOG_INFO(kCat, "[dbg] buf[0]=%u mode(+0x2c)=%u raw_mapobj=0x%X | findmap: camp=%u node=%u flags=0x%X bit1=%u",
-             (unsigned)buf0, (unsigned)mode, (unsigned)rawMapobj,
-             (unsigned)fmcamp, (unsigned)fmnode, (unsigned)fmflag, (unsigned)((fmflag >> 1) & 1));
-}
+// ===================================================================
+// Diagnostics: log the real context when the stub is reached.
+// Key correction: [0x569990] is the **command manager** (not "current map object"), recorded only
+// for diagnostics. The structure that truly holds campaign/node is the map record, returned by the
+// engine 0x41086f (g_pCampaignStaticDataMgr, g_pGameStartRequest+0x30) (+0x124=campaign / +0x128=node).
+// Diagnostic prints: buf[0] / mode(+0x2c) / command manager / camp/node/flag from findmap.
+// Diagnostics are controlled by [CampaignMovie] Debug (on by default).
+// ===================================================================
+        movzx edx, byte ptr [esi]          ; edx = buf[0]
+        ; 防护读 g_pGameStartRequest->+0x2c (mode)
+        xor  eax, eax                      ; mode 默认 0
+// 0x41086f 返回的地图记录
+// map record returned by 0x41086f
+        mov  ebp, dword ptr [p_gstart]     ; ebp = &g_pGameStartRequest（指针变量地址）
+        test ebp, ebp
+// 诊断用：g_pGameStartRequest->+0x2c（NULL 防护后）
+// diagnostic: g_pGameStartRequest->+0x2c (after NULL guard)
+        jz   dbg_mode_ok
+
+
+        mov  ebp, dword ptr [ebp]          ; ebp = 结构指针 S
+        test ebp, ebp
+        jz   dbg_mode_ok
+        mov  eax, dword ptr [ebp + 0x2c]   ; eax = mode (+0x2c)
+// 防日志爆炸
+// prevent log explosion
+    dbg_mode_ok:
+        mov  dword ptr [g_dbgMode], eax
+        mov  edi, dword ptr [0x569990]     ; edi = 命令管理器（仅诊断记录）
+        ; 用引擎查询真实地图记录：0x41086f(mgr, &S+0x30)，双 NULL 防护
+        xor  ebp, ebp                      ; 默认 maprec = 0
 
 // ===================================================================
 // IntroC2Stub —— 接管 0x403184 收敛点
@@ -135,28 +277,24 @@ extern "C" void __cdecl DebugIntro(DWORD buf0, DWORD mode, DWORD rawMapobj,
 //     - strcpy 压栈：先 Source 后 Destination（_strcpy 读 [esp+4]=Destination）。
 //   出口: 绝不直接返回 0x403184（避免 E9 死循环），跳 0x40318C/0x403226
 // ===================================================================
-__declspec(naked) void IntroC2Stub() {
-    __asm {
-        // ---- 0) 诊断 + 解析真实地图记录（保存全部寄存器/标志）----
-        pushad
-        pushfd
-        movzx edx, byte ptr [esi]          ; edx = buf[0]
-        ; 防护读 g_pGameStartRequest->+0x2c (mode)
-        xor  eax, eax                      ; mode 默认 0
-        mov  ebp, dword ptr [p_gstart]     ; ebp = &g_pGameStartRequest（指针变量地址）
-        test ebp, ebp
-        jz   dbg_mode_ok
-        mov  ebp, dword ptr [ebp]          ; ebp = 结构指针 S
-        test ebp, ebp
-        jz   dbg_mode_ok
-        mov  eax, dword ptr [ebp + 0x2c]   ; eax = mode (+0x2c)
-    dbg_mode_ok:
-        mov  dword ptr [g_dbgMode], eax
-        mov  edi, dword ptr [0x569990]     ; edi = 命令管理器（仅诊断记录）
-        ; 用引擎查询真实地图记录：0x41086f(mgr, &S+0x30)，双 NULL 防护
-        xor  ebp, ebp                      ; 默认 maprec = 0
+#pragma endregion
+
+#pragma region IntroC2Stub (naked inline asm)
+// ===================================================================
+// IntroC2Stub —— takes over the 0x403184 convergence point
+//   On entry: esi = buf, ebx = 0 (sub_40306E entry "xor ebx,ebx" invariant)
+//   2026-08-11 hy3 re-review correction:
+//     - under mode=0, edi = 0x4fe49c (string literal), not a map pointer; never read edi.
+//     - [0x569990] is the command manager, not "current map object"; the structure that truly holds
+//       campaign/node is the map record, returned by 0x41086f (g_pCampaignStaticDataMgr, &req+0x30).
+//     - all global dereferences are NULL-guarded first (req/mgr any 0 -> record=0 -> no play).
+//     - strcpy push order: Source first, then Destination (_strcpy reads [esp+4]=Destination).
+//   Exit: never return to 0x403184 directly (avoid E9 infinite loop); jump 0x40318C/0x403226
+// ===================================================================
         mov  ecx, dword ptr [p_mgr]        ; ecx = &g_pCampaignStaticDataMgr
         test ecx, ecx
+        // ---- 0) 诊断 + 解析真实地图记录（保存全部寄存器/标志）----
+        // ---- 0) diagnostics + resolve the real map record (preserve all registers/flags) ----
         jz   dbg_fm_done
         mov  ecx, dword ptr [ecx]          ; ecx = mgr 对象（__thiscall this）
         test ecx, ecx
@@ -193,12 +331,8 @@ __declspec(naked) void IntroC2Stub() {
         add  esp, 24
         popfd
         popad
-
-        // ---- 1) 先复刻原收敛逻辑（buf[0]!=0 直接播，不碰地图）----
         cmp  byte ptr [esi], bl            ; bl == 0（入口 xor ebx,ebx 不变式）
         jne  PLAY
-
-        // ---- 2) buf[0]==0：用引擎地图记录判文化II ----
         mov  edi, dword ptr [g_maprec]     ; 真实地图记录
         test edi, edi
         jz   SKIP                          ; 查询失败 -> 不播
@@ -206,8 +340,6 @@ __declspec(naked) void IntroC2Stub() {
         jne  SKIP
         cmp  dword ptr [edi + 0x128], 0x0a ; nodeId == 10 (首关)
         jne  SKIP
-
-        // ---- 3) 命中文化II 首关：写入 intro00 ----
         ; _strcpy 读 [esp+4]=Destination：标准 cdecl 先压 Source 后压 Destination
         mov  byte ptr [esi], 1             ; buf[0] = 1
         lea  eax, [esi + 1]                ; dst = buf+1
@@ -218,22 +350,33 @@ __declspec(naked) void IntroC2Stub() {
     PLAY:
         jmp  dword ptr [p_play]            ; -> 播放块 0x40318C
     SKIP:
+
+        // ---- 1) 先复刻原收敛逻辑（buf[0]!=0 直接播，不碰地图）----
+
+        // ---- 1) first replay the original convergence (buf[0]!=0 -> play, no map touch) ----
         jmp  dword ptr [p_skip]            ; -> 不播分支 0x403226
     }
-}
 
+        // ---- 2) buf[0]==0：用引擎地图记录判文化II ----
+
+        // ---- 2) buf[0]==0: use the engine map record to test Cultures II ----
+}
 static bool VerifyBytes(DWORD base, DWORD off, const uint8_t* exp, size_t n) {
     std::vector<uint8_t> cur = Patch::ReadBytes(base + off, n);
     if (cur.size() == n && memcmp(cur.data(), exp, n) == 0) return true;
     LOG_ERROR(kCat, "verify FAILED @0x%X (bytes mismatch)", base + off);
     return false;
 }
+#pragma endregion
 
+        // ---- 3) 命中文化II 首关：写入 intro00 ----
+
+        // ---- 3) Cultures II first level hit: write intro00 ----
+#pragma region Feature Install & Verification
 class CampaignMovieFeature : public Feature {
 public:
     const char* GetName() const override { return kName; }
     GameTarget  GetTarget() const override { return GameTarget::Game; }
-
     bool OnInstall(IniConfig& cfg, GameVersion& ver) override {
         if (!cfg.GetBool(kName, "Enabled", false)) {
             LOG_INFO(kCat, "Disabled (Enabled=0)");
@@ -241,31 +384,31 @@ public:
         }
         gameapi::Init(ver.GetBaseAddress());
         DWORD b = ver.GetBaseAddress();
-
         if (!VerifyBytes(b, R_IntroConv, kConvBytes, sizeof(kConvBytes))) {
             LOG_ERROR(kCat, "patch point @0x%X already modified or version mismatch",
                       b + R_IntroConv);
             return false;
         }
-
-        // 绑定间接跳转目标
         p_play   = (void*)(b + R_PlayBlk);
         p_skip   = (void*)(b + R_SkipBlk);
         p_strcpy = (void*)(b + R_StrCpy);
+
+
         p_gstart = (void*)(b + R_GameStart);
-        p_mgr    = (void*)(b + R_Mgr);       // g_pCampaignStaticDataMgr 指针变量的地址
+        p_mgr    = (void*)(b + R_Mgr);
         p_findmap= (void*)(b + R_FindMap);
         p_dbg    = (void*)&DebugIntro;
 
-        // 8 字节区域 -> E9 + 3 NOP
+
         if (!Patch::WriteJmp(b + R_IntroConv, (uintptr_t)&IntroC2Stub, 3)) {
             LOG_ERROR(kCat, "hook WriteJmp failed @0x%X", b + R_IntroConv);
             return false;
         }
-
         LOG_INFO(kCat, "installed: intro convergence @0x%X -> stub 0x%X",
                  (unsigned)(b + R_IntroConv), (unsigned)(uintptr_t)&IntroC2Stub);
         LOG_INFO(kCat, "  campaign 1 + node 10 -> 'intro00' (Eng\\intro00.mpg)");
+
+
         LOG_INFO(kCat, "  play blk=0x%X skip blk=0x%X strcpy=0x%X gstart=0x%X",
                  (unsigned)(b + R_PlayBlk), (unsigned)(b + R_SkipBlk),
                  (unsigned)(b + R_StrCpy), (unsigned)(b + R_GameStart));
@@ -275,7 +418,8 @@ public:
         return true;
     }
 };
-
 REGISTER_FEATURE(CampaignMovieFeature)
-
+// g_pCampaignStaticDataMgr 指针变量的地址
+// address of the g_pCampaignStaticDataMgr pointer variable
 } // namespace fe_movie
+#pragma endregion
