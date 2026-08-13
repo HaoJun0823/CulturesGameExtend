@@ -1,8 +1,50 @@
-# CHANGELOG — CulturesGameExtend
+# CHANGELOG — CulturesGameExtend（中英双语 / Bilingual）
 
 > DLL proxy 增强框架（游戏加载 `dinput8.dll` 代理 → `plugins\CulturesGameExtend.dll`）
 > 目标游戏：Cultures（Saga 版）`Game.exe`（基址 0x400000）
 > 部署：`build_deploy.sh`（cl 命令行编译 + 拷贝干净产物，避开 VS Release 中间产物）
+
+---
+
+## v0.4.0 — CulturesPatches 全量实现 + 运行期 code-cave 注入稳定（里程碑 / milestone，2026-08-13，commit `b426b73`）
+
+> 里程碑 / Milestone：从 `cultures-saga-patches`（Python 静态补丁权威源）完整落地到 C++ 运行期实现，并经用户实跑验证**不再崩溃**。版本锚 / Version anchor：`v2026-08-13-cultures-patches-runtime`。
+> Milestone: the full `cultures-saga-patches` (Python static-patch authoritative source) is now realized as a C++ runtime implementation, verified crash-free by the user.
+
+### 背景 / Background
+- **中文**：`cultures-saga-patches` 是 22 个针对 `Game.exe`（基址 0x400000）的静态补丁（增强/修复）。其 C++ 重实现此前仅覆盖纯字节 `.ini`（16 个），**6 个 code-cave（运行时代码注入）补丁完全缺失**，且 `houseLimits.ini` 存在一个字节 BUG。
+- **EN**: `cultures-saga-patches` is 22 static patches for `Game.exe` (base 0x400000). Its C++ reimplementation only covered pure byte-patch `.ini` (16 of them); **6 code-cave (runtime code-injection) patches were entirely missing**, and `houseLimits.ini` had a byte BUG.
+
+### 新增 / Added
+- **中文**：补全 6 个缺失的 code-cave 补丁为干净 `.ini`（仅保留纯字节补丁，E9 跳板已搬至运行期机制）：`AssistantCtrlClick`、`FixParticleOutsideMapCrash`、`HumanListFilters`、`MultiplayerStability`、`MultiplayerVersionCheck`、`Shortcuts`。
+- **EN**: Added the 6 missing code-cave patches as clean `.ini` (byte-only; their E9 trampolines were moved into the runtime mechanism): `AssistantCtrlClick`, `FixParticleOutsideMapCrash`, `HumanListFilters`, `MultiplayerStability`, `MultiplayerVersionCheck`, `Shortcuts`.
+- **中文**：`CulturesPatchesFeature.cpp` 新增 `ApplyCodeCaves()` —— 运行期把 668 字节 blob（`caves_blob.h`，由 Python `add_code_cave` 布局经 Keystone 提取，VA = 0x400000+0xF21CB）注入独立内存页，并按 `cave_trampolines.h` 的 8 条跳板表把原站点改写为 `E9 rel32`。
+- **EN**: `CulturesPatchesFeature.cpp` gained `ApplyCodeCaves()` — at runtime it injects a 668-byte blob (`caves_blob.h`, extracted via Keystone from the Python `add_code_cave` layout, VA = 0x400000+0xF21CB) into an independent memory page and rewrites the original sites into `E9 rel32` per the 8-entry `cave_trampolines.h` table.
+- **中文**：`houseLimits.ini` 字节 BUG 修正：`0xAA73` 处 `0x3D8400` → `0x3D8600`(=2000×0x7E0)，自相矛盾的注释已同步修正（3 目录同步）。
+- **EN**: Fixed the `houseLimits.ini` byte BUG: at `0xAA73`, `0x3D8400` → `0x3D8600` (=2000×0x7E0); the self-contradictory comment was corrected (synced across 3 dirs).
+
+### 修复 / Fixed
+1. **err=5（ACCESS_DENIED）**
+   - **中文**：初始 `ApplyCodeCaves` 用 `VirtualAlloc(MEM_COMMIT, 0x4F2000)` 落在**映像保留但未提交的间隙页**（PE `.text` 段提交止于 0x4F2000），Windows 禁止对映像保留区间做 MEM_COMMIT → `err=5`，`Feature install FAILED`。
+   - **EN**: Initial `ApplyCodeCaves` used `VirtualAlloc(MEM_COMMIT, 0x4F2000)` landing in an **image-reserved-but-uncommitted gap** (PE `.text` commit ends at 0x4F2000); Windows forbids MEM_COMMIT on image-reserved ranges → `err=5`, `Feature install FAILED`.
+   - **修复 / Fix**：改用 `VirtualAlloc(NULL, …)` 取**独立页面 X**（<0x80000000，Game.exe 非 LAA，E9 rel32 可达），memcpy blob 后运行时重定位。/ Switched to `VirtualAlloc(NULL, …)` for an **independent page X** (<0x80000000; Game.exe is non-LAA so E9 rel32 reaches it), then runtime-relocated the blob.
+2. **运行期零页崩溃（dump `Game.exe.42448.dmp`，0xC0000005 ACCESS_VIOLATION）**
+   - **中文**：重定位循环**只处理 4 字节绝对自引用**，漏掉 `E9/E8/Jcc` 相对外跳的 `rel32`；搬移后相对跳转目标 = 原地址 + delta，飞入 cave 页零填充区执行 → 解引用 NULL 崩。`EIP=0x3340E3B`（cave 页内偏移 0xE3B，远超 668B blob）。
+   - **EN**: The relocation loop only handled **4-byte absolute self-references**, missing `E9/E8/Jcc` relative external jumps' `rel32`; after relocation their targets became original+delta, jumping into the cave page's zero-fill region → NULL deref. `EIP=0x3340E3B` (offset 0xE3B inside the cave page, far beyond the 668B blob).
+   - **修复 / Fix**：新增**相对分支重定位**——目标在 Game.exe 映像内（外部引用）→ `rel32 -= delta`；目标在 blob 内部 → 保持不动（相对位移与基址无关）；两者皆非 → 当数据不碰（防误把 `MOV reg,imm` 的 `0xE8` 当 CALL）。
+   - *Offline simulation / 离线仿真*: 31 条分支 → 24 外部全部落回合法 Game.exe VA；7 内部落 `[X, X+blob)`；2 误报正确跳过。/ 31 branches → 24 external all resolve to legal Game.exe VAs; 7 internal land in `[X, X+blob)`; 2 false-positives correctly skipped.
+
+### 验证 / Verification
+- **中文**：用户实跑确认**不再崩溃** → 标记里程碑。DLL 497152B 内嵌 668B blob（offset 0x59DA0）；8 跳板命中 blob；部署版 `.ini` 零残留 E9 跳板；`[CulturesPatches] install` 日志无 FAILED。
+- **EN**: User confirmed **no crash** on a real run → milestone marked. DLL 497152B embeds the 668B blob (offset 0x59DA0); all 8 trampolines hit the blob; deployed `.ini` has zero stale E9 trampolines; `[CulturesPatches] install` log shows no FAILED.
+
+### 配置 / Config
+- **中文**：全部 22 个补丁由 `[CulturesPatches]` 总开关 + `patches/*.ini` 控制；纯字节补丁走 `ApplyPatchDir()`，code-cave 走 `ApplyCodeCaves()`（先于 `ApplyPatchDir` 调用）。
+- **EN**: All 22 patches are governed by the `[CulturesPatches]` master switch + `patches/*.ini`; byte patches go through `ApplyPatchDir()`, code-caves through `ApplyCodeCaves()` (called before `ApplyPatchDir`).
+
+### 关联产物 / Artifacts
+- **中文**：`caves_blob.h`（668B blob）、`cave_trampolines.h`（8 跳板表）、`/tmp/regen.py`（抽取 22 补丁、拆分跳板、生成两 header、探测 8 处绝对自引用）。
+- **EN**: `caves_blob.h` (668B blob), `cave_trampolines.h` (8-entry trampoline table), `/tmp/regen.py` (extracts 22 patches, splits trampolines, generates both headers, detects 8 absolute self-refs).
 
 ---
 

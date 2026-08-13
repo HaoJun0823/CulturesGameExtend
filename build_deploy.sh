@@ -7,6 +7,8 @@
 #   - 部署只拷"干净产物"到游戏目录，避开 VS Release 的中间产物
 #     (.iobj/.ipdb/.pdb/.exp/.lib 不拷)
 #   - 配置/补丁以项目源码 Resource/ 为准（Resource 镜像游戏根目录）
+#   - 若同级存在 CulturesGameLocalization（子模块或兄弟目录），
+#     其 _build/Data、_build/DataX 也会一并部署（UTF-8 本地化文件）
 # 游戏目录: G:\Projects\Cultures_Saga_CN\SAGA_GAME_HACK
 # ============================================================
 set -e
@@ -14,6 +16,10 @@ set -e
 PROJ_DIR="G:/Projects/CulturesGameExtend"
 SRC_DIR="$PROJ_DIR/CulturesGameExtend"
 GAME_DIR="G:/Projects/Cultures_Saga_CN/SAGA_GAME_HACK"
+# 本地化仓库（子模块 checkout 在项目根 CulturesGameLocalization/，
+# 兄弟目录部署时改这里；找不到则跳过本地化部署）
+LOCALIZATION_DIR="$PROJ_DIR/CulturesGameLocalization"
+[ -d "$LOCALIZATION_DIR/_build/Data" ] || LOCALIZATION_DIR="G:/Projects/CulturesGameLocalization"
 
 CL="/c/Program Files (x86)/Microsoft Visual Studio/18/BuildTools/VC/Tools/MSVC/14.16.27023/bin/Hostx86/x86/cl.exe"
 MSVC_INC="C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.16.27023\include"
@@ -51,6 +57,23 @@ echo "==> [3/3] 部署资源 (以源码 Resource/ 为准；Resource 镜像游戏
 # Resource 即游戏根目录的镜像：直接把整棵树拷进游戏根目录与 Release。
 cp -rf "$PROJ_DIR/Resource/." "$GAME_DIR/"
 cp -rf "$PROJ_DIR/Resource/." "$PROJ_DIR/Release/"
+
+echo "==> [4/4] 部署本地化文件 (UTF-8 文本，来自 CulturesGameLocalization)"
+if [ -d "$LOCALIZATION_DIR/_build/Data" ]; then
+  echo "    从 $LOCALIZATION_DIR/_build 部署..."
+  cp -rf "$LOCALIZATION_DIR/_build/Data/."    "$GAME_DIR/Data/"
+  cp -rf "$LOCALIZATION_DIR/_build/DataX/."   "$GAME_DIR/DataX/"
+  cp -rf "$LOCALIZATION_DIR/_build/."         "$PROJ_DIR/Release/"
+  echo "    OK"
+  # 验证
+  echo "    验证:"
+  ls "$GAME_DIR/Data/maps/" | head -3
+  echo "    ..."
+  ls "$GAME_DIR/DataX/FMV/" 2>/dev/null || echo "    (无 DataX/FMV)"
+else
+  echo "    跳过: $_build/Data 不存在（$LOCALIZATION_DIR）"
+  echo "    提示: 先运行 CulturesGameLocalization 的 build_text.py"
+fi
 
 echo "==> 完成。验证:"
 ls -la "$GAME_DIR/plugins/CulturesGameExtend.dll"
