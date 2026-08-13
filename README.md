@@ -1,7 +1,5 @@
 # CulturesGameExtend
 
-[![CI/CD Pipeline](https://github.com/haojun0823/CulturesGameExtend/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/haojun0823/CulturesGameExtend/actions/workflows/ci-cd.yml)
-
 A community extension DLL for **Cultures** / **Cultures 2: Gates of Asgard** (the
 *Gates of Asgard* / *Die Saga* line by Funatics). It is loaded into the game
 process by a `dinput8.dll` proxy and adds a configurable set of features on top
@@ -23,6 +21,14 @@ Highlights:
 > the game; use it with a legally owned copy.
 
 ---
+
+## Related Projects / 关联项目
+
+- **CulturesGameLocalization** — the Simplified-Chinese (`l10`) text & map
+  localization pack this DLL is designed to render in-game. The two repos are
+  developed separately; this extension provides the UTF-8 text engine that loads
+  the `l10` content authored in that project.
+  <https://github.com/HaoJun0823/CulturesGameLocalization>
 
 ## 1. Installation
 
