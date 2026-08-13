@@ -65,17 +65,16 @@ jobs:
       - name: 构建 CulturesGameExtend (Release)
         shell: pwsh
         run: |
-          $ver = if ($env:CGE_VERSION) { $env:CGE_VERSION } else { "0.0.0" }
           msbuild CulturesGameExtend\CulturesGameExtend.vcxproj `
             /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
             /p:Platform=${{ env.BUILD_PLATFORM }} `
             "/p:PlatformToolset=$env:TOOLSET" `
             "/p:WindowsTargetPlatformVersion=$env:WINSDK" `
-            "/p:PreprocessorDefinitions=CGE_VERSION_STR=`"$ver`";%(PreprocessorDefinitions)" `
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
-            /p:UseEnv=true `
             /m
           if ($LASTEXITCODE -ne 0) { throw "CulturesGameExtend 构建失败" }
+          # 注: CGE_VERSION_STR 宏由源码 #ifndef 兜底 (0.0.0)，
+          #     Release 流水线不注入版本，可从 git tag 环境变量扩展
 
       - name: 构建 CulturesProxyDLL (Release)
         shell: pwsh
@@ -86,7 +85,6 @@ jobs:
             "/p:PlatformToolset=$env:TOOLSET" `
             "/p:WindowsTargetPlatformVersion=$env:WINSDK" `
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
-            /p:UseEnv=true `
             /m
           if ($LASTEXITCODE -ne 0) { throw "CulturesProxyDLL 构建失败" }
 
