@@ -52,24 +52,33 @@ jobs:
       - name: 从 Git 标签提取版本号
         shell: pwsh
         run: |
-          $ver = git describe --tags --abbrev=0 2>$null
-          if (-not $ver) { $ver = "0.0.0" }
-          $ver = $ver -replace '^v' -replace '-.*$'
+          # git describe 可能因无标签返回非零退出码，用 try/catch 处理
+          $ver = "0.0.0"
+          try {
+            $tag = git describe --tags --abbrev=0 2>&1
+            if ($tag -and ($tag -match '^v[\d.]+')) {
+              $ver = $tag -replace '^v' -replace '-.*$'
+            }
+          } catch {
+            # 无标签时使用默认版本
+          }
           echo "CGE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "注入版本: $ver"
+          Write-Host "注入版本: $ver"
 
       - name: 构建 CulturesGameExtend (Release)
         shell: pwsh
         run: |
+          $ver = if ($env:CGE_VERSION) { $env:CGE_VERSION } else { "0.0.0" }
           msbuild CulturesGameExtend\CulturesGameExtend.vcxproj `
             /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
             /p:Platform=${{ env.BUILD_PLATFORM }} `
             "/p:PlatformToolset=$env:TOOLSET" `
             "/p:WindowsTargetPlatformVersion=$env:WINSDK" `
+            "/p:PreprocessorDefinitions=CGE_VERSION_STR=`"$ver`";%(PreprocessorDefinitions)" `
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
             /p:UseEnv=true `
             /m
-          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "CulturesGameExtend 构建失败" }
 
       - name: 构建 CulturesProxyDLL (Release)
         shell: pwsh
@@ -82,7 +91,7 @@ jobs:
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
             /p:UseEnv=true `
             /m
-          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "CulturesProxyDLL 构建失败" }
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
