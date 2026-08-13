@@ -34,6 +34,7 @@ cd "$SRC_DIR"
 "$CL" /nologo /LD /EHsc /Y- /utf-8 /std:c++17 /O2 \
   /D WIN32 /D NDEBUG /D CULTURESGAMEEXTEND_EXPORTS /D _WINDOWS /D _USRDLL \
   /D _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING \
+  /D _CRT_SECURE_NO_WARNINGS \
   /D "CGE_VERSION_STR=\"$CGE_VER\"" \
   /I. "/I$MSVC_INC" "/I$SDK_INC_UCRT" "/I$SDK_INC_UM" "/I$SDK_INC_SHARED" \
   dllmain.cpp Core/Logger.cpp Core/IniConfig.cpp Core/GameVersion.cpp \
