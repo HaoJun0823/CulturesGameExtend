@@ -290,6 +290,11 @@ static bool g_wordSplitPatch = false;  // ★23:4x 最终定案：**WordSplitPat
                                        //   ⚠ 旧弃用原因（10:41 justify 分散）已随 NOP 组合解决，勿再回退到 0
                                        //   （WordSplitPatch=0 → 富文本词=整段 → 长文本超宽溢出/消失，用户 23:32 实测）。
 static bool g_blendIdempotent = true;  // BlitGlyph 像素级幂等（防不清空表面跨帧累积）
+static volatile int g_hoverActive = 0;   // ★ hover 变亮重绘窗口标志（sub_4C9FC4 a4=1 → sub_40ECF9 → 字形层同步调用期间为 1）
+static void* g_hoverLayoutObj = nullptr;  // ★ sub_4CA218（hover 检测）入口缓存的排版对象（行列表 this+36 所在对象）
+                                          //   sub_4C9FC4 的 this ≠ 排版对象（02:07 崩溃实锤 0x416CB0 迭代器野指针）
+static volatile int g_inLink = 0;         // ★ sub_4CFE93 解析期链接状态：<anch 标签内=1（词不拆整段收集），
+                                          //   其他标签/</>结束标签=0（词=1 码点不超宽）——02:13 整句变亮源头方案
 static uint32_t EngineColor(const uint8_t* c) {
     if (!c || !g_useEngineColor) return g_textColor;
     return ((uint32_t)c[2] << 16) | ((uint32_t)c[1] << 8) | c[0];
@@ -412,6 +417,17 @@ static int FontLineHeight(const void* font) {
 static void RenderCodepoint(void* self, uint32_t cp, int x, int y, const uint8_t* colorCtx, const void* font) {
     if (!self || cp <= 0x20) return;
     uint32_t color = EngineColor(colorCtx);
+    // ★ 01:1x hover 变亮色捕获：仅 g_hoverActive 窗口（hover 变亮重绘）内记录字形层实际渲染色
+    //   基础色=FFF5E1，变亮=32 32 FF（引擎颜色参数，HoverColorArg 已实证）——记录后清窗口标志
+    if (g_hoverActive) {
+        static int s_hovCol = 0;
+        if (s_hovCol < 12) {
+            s_hovCol++;
+            LOG_INFO(kCat, "HoverGlyph[%d]: cp=U+%04X x=%d y=%d color=0x%06X ctx=%p",
+                     s_hovCol, (unsigned)cp, x, y, (unsigned)(color & 0xFFFFFF), (const void*)colorCtx);
+        }
+        g_hoverActive = 0;
+    }
     uintptr_t fb = *(uintptr_t*)((uintptr_t)self + 0x2C);
     if (!fb) fb = *(uintptr_t*)((uintptr_t)self + 0x28);   // 兜底读 +0x28（旧误判字段，尽量不用）
     int pitch_px = *(int*)((uintptr_t)self + 0x30);
@@ -547,19 +563,32 @@ static bool OnGlyphDraw(void* dc, int ch, int x, int y, const uint8_t* colorCtx,
                  dc, (unsigned)ch, x, y, g_fontSize, (unsigned)g_textColor,
                  (unsigned)EngineColor(colorCtx), font);
     }
-    // ★ 00:4x hover 诊断（限次，纯 hex）：验证 hover 重绘时引擎颜色是否变亮（×1.5）
+    // ★ 00:4x hover 诊断 v2（限次，只记"颜色变化"——hover 变亮 = 颜色 FFF5E1→FFFFFF 或阴影 pass）
     {
         static int s_hoverDbg = 0;
-        if (s_hoverDbg < 16) {
+        static uint32_t s_prevCol = 0;
+        const uint8_t* c = colorCtx;
+        uint32_t colNow = c ? ((uint32_t)c[0] | ((uint32_t)c[1] << 8) | ((uint32_t)c[2] << 16)) : 0;
+        if (s_hoverDbg < 48 && s_prevCol != 0 && colNow != s_prevCol) {
             s_hoverDbg++;
-            const uint8_t* c = colorCtx;
-            LOG_INFO(kCat, "HoverDbg[%d]: cp=U+%04X x=%d y=%d col=[%02X %02X %02X %02X %02X %02X] ctx=%p",
+            LOG_INFO(kCat, "HoverColor[%d]: cp=U+%04X x=%d y=%d col=[%02X %02X %02X] prev=[%02X %02X %02X] ctx=%p",
                      s_hoverDbg, (unsigned)(ch & 0xFF), x, y,
-                     c ? c[0] : 0, c ? c[1] : 0, c ? c[2] : 0, c ? c[3] : 0,
-                     c ? c[4] : 0, c ? c[5] : 0, (void*)colorCtx);
+                     c ? c[0] : 0, c ? c[1] : 0, c ? c[2] : 0,
+                     (uint8_t)(s_prevCol & 0xFF), (uint8_t)((s_prevCol >> 8) & 0xFF), (uint8_t)((s_prevCol >> 16) & 0xFF),
+                     (void*)colorCtx);
         }
+        s_prevCol = colNow;
     }
     if (ch < 0x80) {
+        // ★ 01:2x hover 窗口字节序列 dump——验证变亮重绘传的字节是否 UTF-8（词缓冲 vs 完整文本）
+        if (g_hoverActive) {
+            static int s_hovBytes = 0;
+            if (s_hovBytes < 16) {
+                s_hovBytes++;
+                LOG_INFO(kCat, "HoverByte[%d]: ch=0x%02X x=%d y=%d ctx=%p",
+                         s_hovBytes, (unsigned char)ch, x, y, (const void*)colorCtx);
+            }
+        }
         // ASCII：单字节即完整码点，直接 GDI 渲染（用户拍板全接管）
         RenderCodepoint(dc, (uint32_t)ch, x, y, colorCtx, font);
         return true;
@@ -861,6 +890,63 @@ extern "C" void __declspec(naked) DrawTextStub() {
     }
 }
 
+// ===================================================================
+// ★ 01:0x hover 变亮颜色捕获（sub_40ECF9 入口 0x40ECFC，5 字节：push ecx; cmp [ebp+0x18],0）
+//   目的：hover 变亮重绘（g_hoverActive=1 窗口）期间，dump sub_40ECF9 收到的**颜色参数
+//   （a3 = [ebp+0xC]）**——它直接决定我们字形层（sub_439610 的 [ebp+8] colorCtx）看到什么色。
+//   反汇编定案（sub_4C9FC4 type2 变亮路径 0x4CA0D6）：
+//     - 普通重绘：颜色参数 = 调色板+1024（基础色）
+//     - hover 变亮：sub_40F8FD(复制基础调色板) → sub_40F884(0,1.5,1.5,1.5 缩放对象)
+//       → sub_40FABA(生成变亮调色板 v11) → sub_40ECF9(颜色参数 = &v10)
+//   若 hover 重绘的颜色参数仍 = 基础色 → 变亮没进字形层（需在字形层实现 ×1.5）；
+//   若已变亮 → 是我们字形层读取 colorCtx 的语义问题（{B,G,R} vs 调色板索引）。
+// ===================================================================
+static void HoverColorArg(void* colorArg, void* strArg) {
+    static int n = 0;
+    if (n >= 8) return;
+    n++;
+    unsigned char h[12] = {0};
+    MEMORY_BASIC_INFORMATION mbi = {};
+    if (colorArg && VirtualQuery(colorArg, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+        (uintptr_t)colorArg + 12 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
+        memcpy(h, colorArg, 12);
+    }
+    // str 前 16 字节（安全读）——确认是词缓冲（单字节 GBK+NUL）还是完整 UTF-8
+    unsigned char sh[16] = {0};
+    if (strArg && VirtualQuery(strArg, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+        (uintptr_t)strArg + 16 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
+        memcpy(sh, strArg, 16);
+    }
+    LOG_INFO(kCat, "HoverColorArg[%d]: ptr=%p bytes=%02X %02X %02X %02X | %02X %02X %02X %02X | %02X %02X %02X %02X | str=%p '%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X'",
+             n, colorArg, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11],
+             strArg, sh[0], sh[1], sh[2], sh[3], sh[4], sh[5], sh[6], sh[7],
+             sh[8], sh[9], sh[10], sh[11], sh[12], sh[13], sh[14], sh[15]);
+}
+
+extern "C" void __declspec(naked) HoverColorStub() {
+    __asm {
+        pushad
+        // 仅 hover 变亮重绘窗口内 dump 颜色参数（sub_40ECF9 的 a2 = [ebp+0xC]）与 str（a5=[ebp+0x18]）
+        mov  eax, OFFSET g_hoverActive
+        cmp  dword ptr [eax], 0
+        je   L_hc_skip
+        mov  eax, [ebp + 0x18]   // str（字符串）
+        push eax
+        mov  eax, [ebp + 0x0C]   // 颜色参数（v10 / 调色板+1024）
+        push eax
+        call HoverColorArg
+        add  esp, 8
+        // ★ 01:1x 不清 g_hoverActive——保留窗口到字形层（RenderCodepoint 记录后清），
+        //   这样能确认 hover 重绘的字形层实际渲染颜色
+    L_hc_skip:
+        popad
+        push ecx                 // 原 5 字节：push ecx
+        cmp  dword ptr [ebp + 0x18], 0   // cmp [ebp+0x18],0
+        mov  eax, 40ED01h        // 回 0x40ED01（push ebx）
+        jmp  eax
+    }
+}
+
 // sub_4E21B7 换行分支 hook（0x4E2280，mov ebx,[ebp+0xC]; mov [ebp-4],eax = 6 字节）
 static uintptr_t g_thunkWrap = 0;
 
@@ -894,8 +980,7 @@ extern "C" void __declspec(naked) WrapStub() {
 // ===================================================================
 // ★ 已废弃诊断（不再被调用，保留作参考）：SpaceLog 曾输出富文本词 token 内容 hex，
 //   证实词=单字节 GBK 首字节（E8 00 / E5 00）→ 见 2026-08-12 记忆 SpaceHex 结论。
-static void SpaceLog(void* token) {
-    static int n = 0;
+static void SpaceLog(void* token) {    static int n = 0;
     if (n >= 8) return;
     if (!token) return;
     MEMORY_BASIC_INFORMATION mbi = {};
@@ -908,6 +993,199 @@ static void SpaceLog(void* token) {
     for (int i = 0; i < 8; i++) h[i] = (unsigned char)s[i];
     LOG_INFO(kCat, "SpaceHex[%d]: %02X %02X %02X %02X %02X %02X %02X %02X", n,
              h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+}
+
+// ===================================================================
+// ★ 00:5x hover 诊断 hook（sub_4CA218 = hover 检测入口，7 字节 trampoline）
+//   sub_4CA218：sub_4CA334 命中链接（+32 标志）→ sub_4C9FC4(a4=1) 变亮重绘。
+//   本 hook 只记录"hover 检测被调用 + 鼠标位置"（不修改逻辑），确认 hover 链路是否触发：
+//   - HoverHit 出现 → hover 检测工作 → 问题在"颜色没传变亮"（引擎 blit 层调色板）
+//   - HoverHit 不出现 → hover 检测没触发 → 查 sub_4CA967 标志/鼠标消息路径
+// ===================================================================
+static uintptr_t g_thunkHover = 0;
+
+static void HoverLog(void* self, void* mouse) {
+    static int n = 0;
+    if (n >= 20) return;
+    n++;
+    int mx = -1, my = -1;
+    if (mouse) { mx = *(const int*)mouse; my = *(const int*)((const char*)mouse + 4); }
+    LOG_INFO(kCat, "HoverHit[%d]: self=%p mouse=(%d,%d)", n, self, mx, my);
+}
+
+extern "C" void __declspec(naked) HoverDbgStub() {
+    __asm {
+        pushad
+        // ★ pushad 寄存器布局：[esp+0]=EAX [esp+4]=ECX(this) [esp+8]=EDX [esp+12]=EBX
+        //   [esp+16]=ESP [esp+20]=EBP [esp+24]=ESI [esp+28]=EDI。
+        //   ★ 原 ecx（sub_4CA218 的 this = 排版对象，行列表在 +0x24）位于 [esp+4]，
+        //   不是 [esp+24]（那是 ESI，调用方残留，垃圾）。下方缓存务必用 [esp+4]。
+        mov  eax, [esp + 4]       // 原 ecx（this = 排版对象）
+        mov  edx, OFFSET g_hoverLayoutObj
+        mov  [edx], eax
+        // 诊断：鼠标位置 = 原参数(arg1)，pushad 后位于 [esp+32+4]=[esp+36]
+        mov  eax, [esp + 36]      // a3（鼠标位置指针）
+        push eax
+        mov  eax, [esp + 4]       // 原 ecx（this，供日志）
+        push eax
+        call HoverLog
+        add  esp, 8
+        popad
+        jmp  g_thunkHover         // trampoline：抄 7 字节 → 0x4CA21F（call sub_4CA334 前）
+    }
+}
+
+// ===================================================================
+// ★ 00:5x hover 变亮重绘诊断（sub_4C9FC4 = token 重绘函数，10 字节 trampoline）
+//   ★ 00:5x 定案：sub_4C9FC4 是**通用重绘**——两个调用者：
+//     - sub_4C9F47（普通重绘，每帧遍历 token：sub_4C9FC4(this, a2, i, **0**)）
+//     - sub_4CA218（hover 检测，命中链接 +32=1 → sub_4C9FC4(a2, result, **1**)）
+//   a4=1 才走变亮路径（sub_40F884(0,1.5,1.5,1.5) → sub_40FABA 调色板 → sub_40ECF9 重绘）。
+//   ★ 诊断策略：stub 内先判断 a4==1（hover）才记录——普通重绘（a4=0）高频刷屏会
+//     占满限次挡住 hover 调用（00:58 日志 20 条 hover=0 全是 sub_4C9F47 的教训）。
+// ===================================================================
+static uintptr_t g_thunkRepaint = 0;
+
+// ★ 02:0x-02:13 演进史：整句变亮方案
+//   02:0x 曾实现 HoverLinkRepaint（遍历行列表重绘同 linkId 所有词）——三连崩
+//   （Game.exe.59024/45852/50192：迭代器 __cdecl 误用 + 结构不确定 → 栈破坏 EIP 跳数据区）。
+//   ★ 02:13 弃用遍历，改源头方案：链接内词=整段（TagEntryStub g_inLink + CJKWordColStub 不拆词）
+//   → hover 命中整段 → sub_4C9FC4 重绘整段 → 整句一起亮（原版行为，零遍历零崩溃风险）。
+//   HoverRepaintStub 保持纯诊断（a4=1 置 g_hoverActive 窗口，不干预重绘）。
+
+// ★ 08-13 整句变亮（hover 命中链接词 → 重绘整链接所有词，整句一起亮）。
+//   sub_4C9FC4(this=排版层文本对象, token, a4=1) 被引擎 hover 检测调用时：
+//   若 token 是链接词（+32 链接标志=1），遍历排版对象（g_hoverLayoutObj 行列表 this+36 →
+//   行+8 子 token 列表）找同 linkId（+36）的所有词，逐个 repaint(self, tok, 1) → 整句一起亮。
+//   ★ 防崩溃设计（修复 02:06/02:08/02:11 三连崩）：
+//     - g_inLinkRepaint 防重入：repaint 内部再进本 stub → 直接 trampoline 重绘该字（不再触发遍历）
+//     - 迭代器 **__thiscall**（ecx=state，02:11 反汇编定案）；state 用 16 字节 buffer 防栈越界
+//     - 排版对象用 g_hoverLayoutObj（sub_4CA218 的 this，≠ sub_4C9FC4 的 this，02:08 定案）
+//     - 每个指针 VirtualQuery 校验 + rows≤64/words≤256 上限；遍历失败 fallback 重绘命中词
+static int      g_inLinkRepaint = 0;
+static int      g_linkLog = 0;
+typedef void* (__thiscall* IterFn)(void* state);
+
+// ★ sub_4C9FC4 调用约定（经 0x4CA218 反汇编定案）：
+//   __thiscall(this=排版对象, a2=绘制surface, a3=token, a4=1 变亮)。
+//   ★ a4 必须=1 才走变亮路径；surface 必须与原始调用同一对象，否则画到错误目标。
+//   ★ 因此 repaint 必须 4 参调用：repaint(self, surface, tok, 1)。
+static void HoverLinkRepaint(void* self, void* surface, void* token) {
+    if (g_inLinkRepaint) return;                 // 重入保护（见 HoverRepaintStub L_hr_reenter）
+    int linkId = *(const int*)((const char*)token + 36);
+    typedef void(__thiscall* RepaintFn)(void*, void*, void*, int);
+    RepaintFn repaint = (RepaintFn)0x4C9FC4;
+    if (linkId < 0) { repaint(self, surface, token, 1); return; }   // 非链接：引擎原逻辑
+    g_inLinkRepaint = 1;
+    IterFn first = (IterFn)0x416CA0;
+    IterFn next  = (IterFn)0x4D0BE0;
+    MEMORY_BASIC_INFORMATION mbi = {};
+    int rows = 0, repainted = 0;
+    // ★ self = sub_4C9FC4 的 this = 排版对象（与 sub_4C9F47/sub_4CA218 一致：行列表在 +0x24）。
+    void* layoutObj = self;
+    uint32_t listHead = 0;
+    if (layoutObj && VirtualQuery((char*)layoutObj + 0x24, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+        (uintptr_t)layoutObj + 0x28 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize) {
+        listHead = *(const uint32_t*)((const char*)layoutObj + 0x24);   // 行列表头（sub_4C9F47 证实行列表在 +0x24）
+    }
+    bool headOk = listHead >= 0x10000 && listHead < 0x7FFFFFFF &&
+                  VirtualQuery((const void*)listHead, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+                  (uintptr_t)listHead + 12 <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    if (headOk) {
+        // ★ 行列表 / 词列表用各自独立的 12 字节 state（仿 sub_4C9F47：v6[2] 行、v8[2] 词）。
+        //   共享同一块 buffer 会让内层 first/next 覆盖外层的 current/flag，破坏外层 next。
+        uint8_t stRow[12] = { 0 };
+        *(uint32_t*)&stRow[0] = listHead;        // 仅填 head；[4]/[8] 由 {0} 初始化为 0
+        for (void* row = first((void*)stRow); row && rows < 64; row = next((void*)stRow)) {
+            if (!VirtualQuery(row, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                (uintptr_t)row + 12 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) break;
+            rows++;
+            uint32_t subHead = *(const uint32_t*)((const char*)row + 8);   // 行+8 = 词列表头（sub_4C9F47: v8[0]=row[2]）
+            if (subHead < 0x10000 || subHead >= 0x7FFFFFFF ||
+                !VirtualQuery((const void*)subHead, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                (uintptr_t)subHead + 12 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) continue;
+            uint8_t stTok[12] = { 0 };
+            *(uint32_t*)&stTok[0] = subHead;
+            for (void* tok = first((void*)stTok); tok && repainted < 256; tok = next((void*)stTok)) {
+                if (!VirtualQuery(tok, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                    (uintptr_t)tok + 40 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) break;
+                if (!*(const uint8_t*)((const char*)tok + 32)) continue;   // 非链接词（+0x20 标志，sub_4CA218 据此判定）
+                if (*(const int*)((const char*)tok + 36) != linkId) continue;
+                repainted++;
+                repaint(self, surface, tok, 1);
+            }
+        }
+    }
+    // ★ 兜底：linkId 匹配数为 0（链接 id 未传播/不一致）→ 重绘本排版对象内所有链接词（整句/整段亮）。
+    //   双链接同框极端情况会一起亮，但远优于逐字亮；绝不崩溃。
+    if (repainted == 0) {
+        int r2 = 0, allLink = 0;
+        if (headOk) {
+            uint8_t stRow2[12] = { 0 };
+            *(uint32_t*)&stRow2[0] = listHead;
+            for (void* row = first((void*)stRow2); row && r2 < 64; row = next((void*)stRow2)) {
+                if (!VirtualQuery(row, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                    (uintptr_t)row + 12 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) break;
+                r2++;
+                uint32_t subHead = *(const uint32_t*)((const char*)row + 8);
+                if (subHead < 0x10000 || subHead >= 0x7FFFFFFF ||
+                    !VirtualQuery((const void*)subHead, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                    (uintptr_t)subHead + 12 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) continue;
+                uint8_t stTok2[12] = { 0 };
+                *(uint32_t*)&stTok2[0] = subHead;
+                for (void* tok = first((void*)stTok2); tok && allLink < 256; tok = next((void*)stTok2)) {
+                    if (!VirtualQuery(tok, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+                        (uintptr_t)tok + 40 > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) break;
+                    if (!*(const uint8_t*)((const char*)tok + 32)) continue;   // 仅链接词
+                    allLink++;
+                    repainted++;
+                    repaint(self, surface, tok, 1);
+                }
+            }
+        }
+        if (allLink == 0) { repaint(self, surface, token, 1); repainted = 1; }   // 仍无链接词 → 单字亮（兜底，不崩）
+    }
+    if (g_linkLog < 6) {
+        g_linkLog++;
+        LOG_INFO(kCat, "LinkHover[%d]: linkId=%d rows=%d words=%d (repaint linked words)",
+                 g_linkLog, linkId, rows, repainted);
+    }
+    g_inLinkRepaint = 0;
+}
+
+extern "C" void __declspec(naked) HoverRepaintStub() {
+    __asm {
+        pushad
+        // ★ sub_4C9FC4 入口 ESP（pushad 前）：[esp+0]=返回地址、[esp+4]=a2(绘制surface)、
+        //   [esp+8]=a3(token)、[esp+0xC]=a4(hover)。ECX=this(排版对象)。
+        //   pushad 后偏移 +32：this=[esp+4]、a2(surface)=[esp+36]、token=[esp+40]、a4=[esp+44]。
+        mov  eax, [esp + 44]      // a4（hover 标志）
+        test eax, eax
+        je   L_hr_tramp           // ★ 普通重绘（a4=0）：直接 trampoline
+        mov  edx, OFFSET g_inLinkRepaint
+        cmp  dword ptr [edx], 1
+        je   L_hr_tramp           // ★ 重入（repaint 内部再进本 stub）：直接 trampoline 重绘该字
+        mov  edx, OFFSET g_hoverActive
+        mov  dword ptr [edx], 1   // ★ hover 变亮重绘窗口开启
+        mov  ebx, [esp + 40]      // a3（token）
+        test ebx, ebx
+        je   L_hr_tramp
+        cmp  byte ptr [ebx + 32], 0   // token+32 = 链接标志
+        je   L_hr_tramp               // 非链接词 → 引擎原逻辑（重绘单词，单字亮）
+        // 链接词 → 整句变亮：遍历同 linkId 所有词逐个 repaint（传 surface 保证画到同一目标）。
+        // ★ self = sub_4C9FC4 的 this（= 排版对象，行列表在 +0x24），位于 [esp+4]（ECX）。
+        //   surface = sub_4C9FC4 的 a2（绘制surface），位于 [esp+36]。二者都要传给 HoverLinkRepaint。
+        mov  ecx, [esp + 4]       // self（排版对象）
+        mov  eax, [esp + 36]      // surface（绘制surface）
+        push ebx                  // 参数3：token
+        push eax                  // 参数2：surface
+        push ecx                  // 参数1：self
+        call HoverLinkRepaint
+        add  esp, 12
+    L_hr_tramp:
+        popad
+        jmp  g_thunkRepaint       // trampoline：抄 10 字节 → 0x4C9FCE（push esi）
+    }
 }
 
 // ★ 已废弃（23:4x）：0x4CA612 改 NOP 后本 stub 不再安装。保留仅为演进史参考——
@@ -1087,6 +1365,36 @@ static void InstallHooks(uintptr_t base) {
             LOG_ERROR(kCat, "InstallHooks: NOP 0x4CA604 FAIL");
     } else LOG_WARN(kCat, "InstallHooks: link-state bytes mismatch @0x4CA604 (skip)");
 
+    // ★ 00:5x hover 诊断 hook（sub_4CA218 = hover 检测入口，7 字节 trampoline）——
+    //   只记录"hover 检测被调 + 鼠标位置"，不修改逻辑（确认 hover 链路是否触发）
+    uintptr_t eHover = base + (0x4CA218 - 0x400000);
+    auto eh = Patch::ReadBytes(eHover, 7);
+    if (eh.size() == 7 && eh[0] == 0x56 && eh[1] == 0xFF && eh[2] == 0x74 &&
+        eh[3] == 0x24 && eh[4] == 0x0C && eh[5] == 0x8B && eh[6] == 0xF1) {
+        g_thunkHover = MakeTrampoline(eHover, 7);
+        if (g_thunkHover && Patch::WriteJmp(eHover, (uintptr_t)&HoverDbgStub))
+            LOG_INFO(kCat, "InstallHooks: hooked sub_4CA218 hover-detect (diag).");
+    } else LOG_WARN(kCat, "InstallHooks: hover bytes mismatch @0x4CA218 (skip)");
+
+    // ★ 00:5x hover 变亮重绘诊断（sub_4C9FC4，10 字节 trampoline）——记录变亮重绘是否执行
+    uintptr_t eRepaint = base + (0x4C9FC4 - 0x400000);
+    auto er = Patch::ReadBytes(eRepaint, 10);
+    if (er.size() == 10 && er[0] == 0x55 && er[1] == 0x8B && er[2] == 0xEC &&
+        er[3] == 0x81 && er[4] == 0xEC && er[9] == 0x53) {
+        g_thunkRepaint = MakeTrampoline(eRepaint, 10);
+        if (g_thunkRepaint && Patch::WriteJmp(eRepaint, (uintptr_t)&HoverRepaintStub))
+            LOG_INFO(kCat, "InstallHooks: hooked sub_4C9FC4 hover-repaint (diag).");
+    } else LOG_WARN(kCat, "InstallHooks: repaint bytes mismatch @0x4C9FC4 (skip)");
+
+    // ★ 01:0x hover 变亮颜色捕获（sub_40ECF9 入口 0x40ECFC，5 字节）——
+    //   g_hoverActive 窗口内 dump 颜色参数（a3=[ebp+0xC]），确认变亮色是否到达字形层上游
+    uintptr_t eHoverColor = base + (0x40ECFC - 0x400000);
+    auto ehc = Patch::ReadBytes(eHoverColor, 5);
+    if (ehc.size() == 5 && ehc[0] == 0x51 && ehc[1] == 0x83 && ehc[2] == 0x7D && ehc[3] == 0x18) {
+        if (Patch::WriteJmp(eHoverColor, (uintptr_t)&HoverColorStub))
+            LOG_INFO(kCat, "InstallHooks: hooked sub_40ECF9 hover-color (diag).");
+    } else LOG_WARN(kCat, "InstallHooks: hover-color bytes mismatch @0x40ECFC (skip)");
+
     // ★ 11:4x 超宽词字符级折行 hook（0x4E2267 测宽后，LG4 同款点）：
     //   超宽词截断为单字符 + String1 推进 → 引擎逐字符排版（修 IP/长词溢出、不显示）
     uintptr_t eLayMeas = base + (0x4E2267 - 0x400000);
@@ -1098,35 +1406,136 @@ static void InstallHooks(uintptr_t base) {
     } else LOG_WARN(kCat, "InstallHooks: layMeas bytes mismatch (skip)");
 }
 
-// ★ 2026-08-12 分词补丁（LG4/LG0 同款思路，只打补丁① RVA 0xD053B）
+// ===================================================================
+// ★ 08-13 修复"文字全部消失"（07:09 之后仍消失）：双跳转岛方案（不依赖 code cave）
+//   根因：0x4D053A 的 5 字节 E9 覆盖 0x4D053D（分隔符→词结束 push 1Ch），而原循环 7 个
+//   `je 0x4d053d`（空格/边界bl/tab/换行/CR/'<'/'\n'）在真实文本（含空格/标签）下跳进垃圾
+//   字节 → 整段解析崩坏 → 文字全消失。01:5x 仅因测"你好世界"（无空格）侥幸未触发。
+//   修复：用 0x4D0530 / 0x4D053A 两个 5 字节点做跳转岛：
+//     - 0x4D0530 → CJKCharStub：非分隔符字符路径（码点/链接整段收集）
+//     - 0x4D053A → SepStub      ：push 1Ch; jmp 0x4D053F（词结束，分隔符安全收尾）
+//   6 个 je 的 1 字节位移改跳 0x4D053A（均在 ±127，rel8 够）。0x4D053D 虽被覆盖但永
+//   不可达 → 安全。CJK 词=1 码点（不超宽+词缓冲完整），链接内词=整段（整句变亮）。
+//   寄存器契约（入口 0x4D0530 时）：al=[edi]（0x4D0516 已读）、esi=词起始、edi=扫描指针。
+// ===================================================================
+extern "C" void __declspec(naked) SepStub() {
+    __asm {
+        push 1Ch                 // 原 0x4D053D: push 1Ch（operator new 参数）
+        mov  eax, 4D053Fh        // 跳 0x4D053F（call operator new，完整保留）
+        jmp  eax
+    }
+}
+
+// ===================================================================
+// ★ 08-13 整句变亮修复：恢复 02:01 纯 UTF-8 码点词收集（hook 0x4D053A，5 字节 E9）。
+//   背景：单字节词缓冲（E4 00）无法渲染 → hover 变亮失效（用户 01:57 数据实锤）；
+//   整段词（g_inLink/TagEntryStub，02:17/07:09/07:23）连续空白，已弃用。
+//   本 stub：词 = **1 个完整 UTF-8 码点**（≤4 字节）→ 不超宽（长文本完整）+ 词缓冲完整
+//   （变亮可渲染 → 恢复 hover 变亮）。每个字符都 push 1Ch; jmp 0x4D053F 收尾，
+//   **绝不跳回 0x4D0516 循环头** → 0x4D053D（被 E9 覆盖为垃圾）永不可达 → 分隔符路径安全。
+//   寄存器契约（0x4D053A 时）：al=[edi]（0x4D0516 已读当前字符），esi=词起始，edi=扫描指针。
+//   反斜杠转义（\n 等）由 0x4D0530 原逻辑处理（本 hook 点 0x4D053A 在其后，见不到已结束的转义）。
+// ===================================================================
+extern "C" void __declspec(naked) CJKWordColStub() {
+    __asm {
+        cmp  al, 0x80
+        jb   L_wc_ascii          // 0x00-0x7F ASCII：1 字节
+        cmp  al, 0xC0
+        jb   L_wc_ascii          // 0x80-0xBF 游离续字节（理论不出现，保守 1 字节）
+        cmp  al, 0xE0
+        jb   L_wc_2
+        cmp  al, 0xF0
+        jb   L_wc_3
+        add  edi, 4              // 4 字节码点
+        jmp  L_wc_end
+    L_wc_2:
+        add  edi, 2
+        jmp  L_wc_end
+    L_wc_3:
+        add  edi, 3
+        jmp  L_wc_end
+    L_wc_ascii:
+        inc  edi
+    L_wc_end:
+        push 1Ch                 // ★ 覆盖的原 0x4D053D: push 1Ch（operator new 参数）
+        mov  eax, 4D053Fh        // 跳 0x4D053F（call operator new，完整保留）
+        jmp  eax
+    }
+}
+
+// ===================================================================
+// ★ 02:13 标签入口链接状态跟踪（hook 0x4CFF00，5 字节 E9）
+//   0x4CFF00 = sub_4CFE93 标签处理入口（lea eax,[edi+1]=Str; push 3Eh），每个 <标签> 必经。
+//   [edi+1] = 标签名首字符：'/'（结束标签）→ g_inLink=0；"anch" → g_inLink=1；其他 → 0。
+//   配合 CJKWordColStub：链接内词=整段（整句变亮），普通词=1 码点（不超宽）。
+//   ★ E9 覆盖 0x4CFF00-0x4CFF04（lea eax,[edi+1]; push 3Eh）→ stub 手动补后跳 0x4CFF05。
+// ===================================================================
+extern "C" void __declspec(naked) TagEntryStub() {
+    __asm {
+        pushad
+        // 判断标签名（[edi+1] 起）
+        movzx eax, byte ptr [edi + 1]   // 首字符
+        cmp  al, 2Fh                    // '/'
+        jne  L_tg_notend
+        // 结束标签 → g_inLink = 0
+        mov  eax, OFFSET g_inLink
+        mov  byte ptr [eax], 0
+        jmp  L_tg_done
+    L_tg_notend:
+        cmp  al, 61h                    // 'a'
+        jne  L_tg_clear
+        cmp  byte ptr [edi + 2], 6Eh    // 'n'
+        jne  L_tg_clear
+        cmp  byte ptr [edi + 3], 63h    // 'c'
+        jne  L_tg_clear
+        cmp  byte ptr [edi + 4], 68h    // 'h'
+        jne  L_tg_clear
+        mov  eax, OFFSET g_inLink       // "<anch" → 1
+        mov  byte ptr [eax], 1
+        jmp  L_tg_done
+    L_tg_clear:
+        mov  eax, OFFSET g_inLink       // 其他开始标签 → 0
+        mov  byte ptr [eax], 0
+    L_tg_done:
+        popad
+        lea  eax, [edi + 1]             // 原 0x4CFF00: lea eax,[edi+1]
+        push 3Eh                        // 原 0x4CFF03: push 3Eh
+        mov  eax, 4CFF05h               // 回 0x4CFF05（push edi）
+        jmp  eax
+    }
+}
+
+// ★ 2026-08-12 分词补丁（LG4/LG0 同款思路）
 //   ★ 23:4x 现状：**WordSplitPatch=1 启用中**（最终方案的一部分）——补丁① 让 sub_4CFE93
 //   词扫描单字节化 → 富文本词=单字节 → 不超宽 → 长文本完整显示（用户 23:41 实测正常）。
 //   副作用"每字节后空格宽=9px → 分散"由 0x4CA612 NOP 消除 → 中文紧凑。
 //   ⚠ 勿回退到 0：词=整段 → 富文本长文本超宽溢出/消失（用户 23:32 实测）。
 //   ★ 补丁②(RVA 0xE2251) 在 Saga 上 NOP 必死循环（sub_4E21B7 外层不自行推进指针），不可用。
 //   ★ 历史：10:41 曾因"简报 justify 分散"弃用（词=1字符 → 每字均匀分散），后随 NOP 组合解决。
+//   ★★ 08-13 01:5x 升级：NOP(0x4D053B 词=单字节) → hook 0x4D053A（词=1 完整 UTF-8 码点）。
+//   原因：单字节词缓冲（E4 00）无法渲染 → hover 变亮失效（用户 01:57 数据实锤）。
+//   码点词：不超宽（长文本完整保持）+ 词缓冲完整（变亮可渲染）。
 static void InstallWordSplitPatches(uintptr_t base) {
-    const uint8_t nops[2] = { 0x90, 0x90 };
-    struct Pt { uint32_t rva; uint8_t b0, b1; const char* what; };
-    static const Pt pts[] = {
-        { 0xD053B, 0xEB, 0xD9, "rich-text parser word-loop" },
-        // { 0xE2251, 0x75, 0xDC, "layout word-collect loop" },  // ★ Saga 上 NOP 死循环，禁用
-    };
-    for (const auto& p : pts) {
-        uintptr_t va = base + p.rva;
-        auto cur = Patch::ReadBytes(va, 2);
-        if (cur.size() != 2 || cur[0] != p.b0 || cur[1] != p.b1) {
-            LOG_WARN(kCat, "WordSplitPatch SKIP @RVA 0x%X: bytes %02X %02X (expect %02X %02X) - %s",
-                     (unsigned)p.rva, cur.size() == 2 ? cur[0] : 0, cur.size() == 2 ? cur[1] : 0,
-                     p.b0, p.b1, p.what);
-            continue;
-        }
-        if (!Patch::WriteBytes(va, nops, 2)) {
-            LOG_ERROR(kCat, "WordSplitPatch FAIL @RVA 0x%X - %s", (unsigned)p.rva, p.what);
-        } else {
-            LOG_INFO(kCat, "WordSplitPatch OK @RVA 0x%X (%s) -> 90 90 (single-char word split)",
-                     (unsigned)p.rva, p.what);
-        }
+    // ★ 08-13 整句变亮修复：恢复 02:01 纯 UTF-8 码点词收集（hook 0x4D053A，5 字节 E9 → CJKWordColStub）。
+    //   机制：每个非分隔符字符 → CJKWordColStub 按码点长度推进 edi → push 1Ch; jmp 0x4D053F 结束成词。
+    //   词=1 完整码点（≤4 字节）→ 不超宽（长文本完整）+ 词缓冲完整（变亮可渲染 → 恢复 hover 变亮）。
+    //   ★ 安全点：stub 每个字符都走 push 1Ch; jmp 0x4D053F 收尾，**绝不跳回 0x4D0516 循环头** →
+    //   0x4D053D（被 E9 覆盖为垃圾）永不可达 → 分隔符路径安全（不跳进垃圾）。这是 02:01/02:03
+    //   验证"文字可见+变亮恢复"的方案；本次叠加 HoverLinkRepaint（整句亮）于其上。
+    //   0x4D053A 原字节：inc edi; jmp; push 1Ch = 47 EB D9 6A 1C
+    uintptr_t eWc = base + (0x4D053A - 0x400000);
+    auto cur = Patch::ReadBytes(eWc, 5);
+    if (cur.size() == 5 && cur[0] == 0x47 && cur[1] == 0xEB && cur[2] == 0xD9 &&
+        cur[3] == 0x6A && cur[4] == 0x1C) {
+        if (Patch::WriteJmp(eWc, (uintptr_t)&CJKWordColStub))
+            LOG_INFO(kCat, "WordSplitPatch OK @RVA 0xD053A (UTF-8 codepoint word-collect, E9 -> CJKWordColStub).");
+        else
+            LOG_ERROR(kCat, "WordSplitPatch FAIL @RVA 0xD053A (write)");
+    } else {
+        LOG_WARN(kCat, "WordSplitPatch SKIP @RVA 0xD053A: bytes %02X %02X %02X %02X %02X (expect 47 EB D9 6A 1C)",
+                 cur.size() >= 1 ? cur[0] : 0, cur.size() >= 2 ? cur[1] : 0,
+                 cur.size() >= 3 ? cur[2] : 0, cur.size() >= 4 ? cur[3] : 0,
+                 cur.size() >= 5 ? cur[4] : 0);
     }
 }
 
