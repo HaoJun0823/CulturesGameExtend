@@ -36,11 +36,38 @@ jobs:
       - name: 添加 MSBuild 到 PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: 设置 MSVC 命令行环境 (x86)
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x86
-          toolset: 14.16                   # v141 工具集 (VS 2017)
+      - name: 安装 v141_xp 工具集
+        shell: pwsh
+        run: |
+          # 检查 v141_xp 是否已安装
+          $testPath = "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\vc\v141"
+          if (Test-Path "$testPath") {
+            Write-Host "v141_xp 工具集已存在，跳过安装"
+          } else {
+            Write-Host "正在安装 v141_xp 工具集..."
+            $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $vsPath = & $vsWhere -latest -property installationPath
+            $setupExe = "$vsPath\Installer\setup.exe"
+            # 安装 Windows XP 支持 for C++ 组件
+            & $setupExe modify --installPath "$vsPath" `
+              --add Microsoft.VisualStudio.Component.VC.v141.xp `
+              --quiet --norestart --wait
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::warning::v141_xp 安装失败，将使用 v142 作为回退工具集"
+              echo "USE_FALLBACK_TOOLSET=true" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            } else {
+              Write-Host "v141_xp 工具集安装完成"
+            }
+          }
+      
+      - name: 设置工具集版本环境变量
+        shell: pwsh
+        run: |
+          if ("$env:USE_FALLBACK_TOOLSET" -eq "true") {
+            echo "TOOLSET=v142" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            echo "TOOLSET=v141_xp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
 
       - name: 从 Git 标签提取版本号
         shell: pwsh
@@ -52,22 +79,32 @@ jobs:
           echo "注入版本: $ver"
 
       - name: 构建 CulturesGameExtend (Release)
+        shell: pwsh
         run: |
+          $toolset = if ($env:TOOLSET) { $env:TOOLSET } else { "v141_xp" }
+          Write-Host "Using PlatformToolset: $toolset"
           msbuild CulturesGameExtend\CulturesGameExtend.vcxproj `
             /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
             /p:Platform=${{ env.BUILD_PLATFORM }} `
-            /p:OutDir=${{ github.workspace }}\BuildOutput\ `
-            /p:UseEnv=true `
-            /m                         # 并行编译
-
-      - name: 构建 CulturesProxyDLL (Release)
-        run: |
-          msbuild CulturesProxyDLL\CulturesProxyDLL.vcxproj `
-            /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
-            /p:Platform=${{ env.BUILD_PLATFORM }} `
+            "/p:PlatformToolset=$toolset" `
             /p:OutDir=${{ github.workspace }}\BuildOutput\ `
             /p:UseEnv=true `
             /m
+          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+
+      - name: 构建 CulturesProxyDLL (Release)
+        shell: pwsh
+        run: |
+          $toolset = if ($env:TOOLSET) { $env:TOOLSET } else { "v141_xp" }
+          Write-Host "Using PlatformToolset: $toolset"
+          msbuild CulturesProxyDLL\CulturesProxyDLL.vcxproj `
+            /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
+            /p:Platform=${{ env.BUILD_PLATFORM }} `
+            "/p:PlatformToolset=$toolset" `
+            /p:OutDir=${{ github.workspace }}\BuildOutput\ `
+            /p:UseEnv=true `
+            /m
+          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
