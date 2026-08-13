@@ -52,18 +52,15 @@ jobs:
       - name: 从 Git 标签提取版本号
         shell: pwsh
         run: |
-          # git describe 可能因无标签返回非零退出码，用 try/catch 处理
           $ver = "0.0.0"
-          try {
-            $tag = git describe --tags --abbrev=0 2>&1
-            if ($tag -and ($tag -match '^v[\d.]+')) {
-              $ver = $tag -replace '^v' -replace '-.*$'
-            }
-          } catch {
-            # 无标签时使用默认版本
+          # 用 git tag 代替 describe，避免无标签时非零退出码
+          $tags = git tag --list 'v*' 2>$null
+          if ($tags) {
+            $lastTag = $tags[-1] -replace '^v' -replace '-.*$'
+            if ($lastTag) { $ver = $lastTag }
           }
-          echo "CGE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "注入版本: $ver"
+          "CGE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: 构建 CulturesGameExtend (Release)
         shell: pwsh
