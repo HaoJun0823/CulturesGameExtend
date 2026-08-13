@@ -1,5 +1,7 @@
 # CulturesGameExtend
 
+[![CI/CD Pipeline](https://github.com/haojun0823/CulturesGameExtend/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/haojun0823/CulturesGameExtend/actions/workflows/ci-cd.yml)
+
 A community extension DLL for **Cultures** / **Cultures 2: Gates of Asgard** (the
 *Gates of Asgard* / *Die Saga* line by Funatics). It is loaded into the game
 process by a `dinput8.dll` proxy and adds a configurable set of features on top

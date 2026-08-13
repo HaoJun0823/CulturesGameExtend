@@ -1,0 +1,129 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE.txt'
+      - '.gitattributes'
+      - '.gitmodules'
+    tags:
+      - 'v*'                           # 推送 v0.4.0 等标签时自动发布
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: Win32
+  SOLUTION_DIR: .
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 构建作业
+  # ──────────────────────────────────────────────
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0                   # 获取所有 tag 用于版本号注入
+
+      - name: 添加 MSBuild 到 PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: 设置 MSVC 命令行环境 (x86)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+          toolset: 14.16                   # v141 工具集 (VS 2017)
+
+      - name: 从 Git 标签提取版本号
+        shell: pwsh
+        run: |
+          $ver = git describe --tags --abbrev=0 2>$null
+          if (-not $ver) { $ver = "0.0.0" }
+          $ver = $ver -replace '^v' -replace '-.*$'
+          echo "CGE_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "注入版本: $ver"
+
+      - name: 构建 CulturesGameExtend (Release)
+        run: |
+          msbuild CulturesGameExtend\CulturesGameExtend.vcxproj `
+            /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
+            /p:Platform=${{ env.BUILD_PLATFORM }} `
+            /p:OutDir=${{ github.workspace }}\BuildOutput\ `
+            /p:UseEnv=true `
+            /m                         # 并行编译
+
+      - name: 构建 CulturesProxyDLL (Release)
+        run: |
+          msbuild CulturesProxyDLL\CulturesProxyDLL.vcxproj `
+            /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
+            /p:Platform=${{ env.BUILD_PLATFORM }} `
+            /p:OutDir=${{ github.workspace }}\BuildOutput\ `
+            /p:UseEnv=true `
+            /m
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: CulturesGameExtend-${{ env.BUILD_CONFIGURATION }}
+          path: |
+            BuildOutput\*.dll
+            BuildOutput\*.pdb
+            BuildOutput\plugins\**\*
+            BuildOutput\config\**\*
+            BuildOutput\Data\**\*
+          if-no-files-found: error
+
+  # ──────────────────────────────────────────────
+  # 发布作业（仅 tag 推送时触发）
+  # ──────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                    # 允许创建 Release
+
+    steps:
+      - name: 检出代码（用于 Release Notes）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: CulturesGameExtend-${{ env.BUILD_CONFIGURATION }}
+          path: artifacts
+
+      - name: 打包为 ZIP
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zipName = "CulturesGameExtend-${tag}.zip"
+          Compress-Archive -Path artifacts\* -DestinationPath $zipName
+          echo "Created: $zipName"
+          echo "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
+          body: |
+            ## CulturesGameExtend ${{ github.ref_name }}
+
+            📦 包含：
+            - `CulturesGameExtend.dll` — 主增强插件
+            - `dinput8.dll` — 代理载体 DLL
+            - `plugins/` — 配置文件与资源
+
+            > 部署：将 ZIP 解压到游戏目录 `SAGA_GAME_HACK/` 即可。
+            > 详细更新见 [CHANGELOG.md](CHANGELOG.md)。
