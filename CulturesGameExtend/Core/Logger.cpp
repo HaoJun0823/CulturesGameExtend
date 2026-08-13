@@ -13,6 +13,11 @@ std::ofstream     g_logFile;
 LogLevel          g_minLevel = LogLevel::Info;
 std::string       g_logPath;
 
+// 独立 Warning 日志（GameWarnings.log）
+std::mutex        g_warnMutex;
+std::ofstream     g_warnFile;
+std::string       g_warnPath;
+
 const char* LevelName(LogLevel l) {
     switch (l) {
         case LogLevel::Trace: return "TRACE";
@@ -73,6 +78,42 @@ void LogWrite(const char* category, LogLevel level, const char* fmt, ...) {
     if (g_logFile.is_open()) {
         g_logFile << line;
         g_logFile.flush();
+    }
+    OutputDebugStringA(line.c_str());
+}
+
+// ===================================================================
+// 独立 Warning 日志：记录游戏内 Warning! 开发者断言框（不再致命）。
+// 与 g_logFile 并行，写到 logs/GameWarnings.log，同样 flush + OutputDebugString。
+// ===================================================================
+void WarnLogInit(const std::string& logDir, const std::string& fileName) {
+    std::lock_guard<std::mutex> lock(g_warnMutex);
+    std::error_code ec;
+    if (!logDir.empty()) {
+        ge::fs::create_directories(logDir, ec);
+    }
+    g_warnPath = logDir.empty() ? fileName : (logDir + "/" + fileName);
+    g_warnFile.open(g_warnPath, std::ios::out | std::ios::trunc);
+    if (g_warnFile.is_open()) {
+        g_warnFile << "---- [" << NowString() << "] GameWarnings log session start ----\n";
+        g_warnFile.flush();
+    }
+}
+
+void WarnLogWrite(const char* fmt, ...) {
+    if (!fmt) return;
+    std::lock_guard<std::mutex> lock(g_warnMutex);
+
+    char buffer[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    std::string line = "[" + NowString() + "] " + buffer + "\n";
+    if (g_warnFile.is_open()) {
+        g_warnFile << line;
+        g_warnFile.flush();
     }
     OutputDebugStringA(line.c_str());
 }

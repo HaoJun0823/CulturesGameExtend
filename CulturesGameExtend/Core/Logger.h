@@ -21,6 +21,10 @@ void LogInit(const std::string& logDir, const std::string& fileName, LogLevel mi
 // category: 分类前缀，通常为 Feature 名称（如 "[CulturesPatches]"）
 void LogWrite(const char* category, LogLevel level, const char* fmt, ...);
 
+// 独立的 Warning 日志（记录游戏内 Warning! 等开发者断言框，便于排查但不致命）
+void WarnLogInit(const std::string& logDir, const std::string& fileName);
+void WarnLogWrite(const char* fmt, ...);
+
 // 便捷宏：自动带上分类前缀
 #define LOG_TRACE(cat, ...) LogWrite(cat, LogLevel::Trace, __VA_ARGS__)
 #define LOG_DEBUG(cat, ...) LogWrite(cat, LogLevel::Debug, __VA_ARGS__)

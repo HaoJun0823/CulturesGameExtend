@@ -19,6 +19,7 @@
 #include "Features/TitleOverrideFeature.cpp"
 #include "Features/PerMapLogicFeature.cpp"
 #include "Features/TextRendererFeature.cpp"
+#include "Features/WarningLogFeature.cpp"
 
 namespace {
 
