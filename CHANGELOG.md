@@ -42,6 +42,32 @@ LogEnabled = 1  ; 记录日志（hook 接管 MessageBoxA）
 
 ---
 
+## v0.5.1 — MapLoaderExtra：弃 hook 复刻链，改用原生函数注册（里程碑 / milestone，2026-08-13，commit `8522781`）
+
+> 重构 / Refactor：把 `MapLoaderExtraFeature` 从「hook `l_IO_Load` + 复刻引擎内部脆弱注册链」改为「与 `UserCampaignsFeature` 同款的原生函数调用」。`LoadCampaignMap`(0x410E6D) 自己解析 `map.ini`/`map.dat`，路径按相对 CWD 走，从根本上消除旧版的崩溃（绝对路径构造坏指针 → `sub_425072` 虚调用崩）。
+> Refactor: `MapLoaderExtraFeature` now calls the native `IniFile_Open` + `LoadCampaignMap` pair (same pattern as `UserCampaignsFeature`) instead of hooking `l_IO_Load` and replaying the engine's fragile internal chain. Removes the crash root cause entirely.
+
+### 背景 / Background
+- **中文**：旧版 `MapLoaderExtraFeature` hook `sub_410B58`(l_IO_Load) 入口并复刻 `sub_4064E4→sub_424EF8→sub_410E6D→sub_425072` 脆弱链，对绝对路径构造垃圾指针 → `sub_425072` 虚调用崩溃（dump `Game.exe.15708.dmp` @0x42508D 实锤）。应急 SEH 兜底后地图注册失败（日志 `registration threw exception; skipped`）。软连接方案同样脆弱（需 `SeCreateSymbolicLinkPrivilege`、FAT32/exFAT 不支持、跨卷重解析点不保证跟随）。
+- **EN**: The old `MapLoaderExtraFeature` hooked `sub_410B58` and replayed the fragile `sub_4064E4→sub_424EF8→sub_410E6D→sub_425072` chain, building a bad pointer on absolute paths → `sub_425072` virtual call crash (dump `Game.exe.15708.dmp` @0x42508D). SEH fallback only made map registration fail (`registration threw exception; skipped`). Symlinks are equally fragile (need `SeCreateSymbolicLinkPrivilege`, unsupported on FAT32/exFAT, reparse-point I/O not guaranteed).
+
+### 修复 / Fixed
+- **中文**：彻底删除 hook/naked stub/MakeTrampoline/SEH 兜底，改为战后（战役管理器就绪后轮询）对每个 `ExtraMapPaths` 根目录枚举子目录，逐张 `IniFile_Open(map.ini) → LoadCampaignMap(src, a4=0) → IniFile_Close` —— 与 `UserCampaignsFeature::RegisterFolderMap` 逐字节一致。
+- **中文**：新增 `[MapLoaderExtra] CampaignId`（默认 0）：0=单图/遭遇战列表（等同 `data\maps`）；7/8=用户战役列表（第三方独立文件夹最稳）。选 0 时 `src` 传完整相对路径 `.\CustomMaps\<子目录>`，Source 模式直接定位，不依赖 `data\maps` 前缀。
+
+### 验证 / Verification
+- **中文**：`build_deploy.sh` EXIT=0，DLL 507904B 已部署；字节级确认新版串在、旧 hook 串全 MISS。**用户实跑验证通过**：`.\CustomMaps\<合法地图>\` 被成功注册（日志 `registered: ... (campaign 0, ok)`）且能正常进图，旧版崩溃/`registration threw exception; skipped` 彻底消失。campaignId=0（单图/遭遇战列表）路径可行；若日后个别第三方文件夹仍注册失败，可改 ini `CampaignId=7/8`（usercampaign 已验证稳，无需重编译）。
+
+### 配置 / Config
+```ini
+[MapLoaderExtra]
+Enabled = 1
+ExtraMapPaths = .\CustomMaps   ; 分号分隔；每个根目录下的子目录 = 一张地图
+CampaignId = 0                 ; 0=单图/遭遇战；7/8=用户战役（第三方文件夹最稳）
+```
+
+---
+
 ## v0.4.0 — CulturesPatches 全量实现 + 运行期 code-cave 注入稳定（里程碑 / milestone，2026-08-13，commit `b426b73`）
 
 > 里程碑 / Milestone：从 `cultures-saga-patches`（Python 静态补丁权威源）完整落地到 C++ 运行期实现，并经用户实跑验证**不再崩溃**。版本锚 / Version anchor：`v2026-08-13-cultures-patches-runtime`。
