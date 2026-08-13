@@ -6,6 +6,42 @@
 
 ---
 
+## v0.5.0 — WarningLog：记录 Warning! 开发者断言框 + 禁止其关闭游戏（里程碑 / milestone，2026-08-13，commit `d73dac7`）
+
+> 里程碑 / Milestone：根治 `Warning!` 弹框（实为开发者 assert 残留）在玩家按 Cancel/X/Esc 时 `__debugbreak` → 无调试器 → 进程自杀的问题。版本锚 / Version anchor：`v2026-08-13-warninglog`。
+> Milestone: fixes the `Warning!` box (a leftover developer assert) killing the process via `__debugbreak` when the player presses Cancel/X/Esc with no debugger attached.
+
+### 背景 / Background
+- **中文**：`sub_47A14D`（所有 `Warning!` 框共用封装）尾部 `int 3` 是"Cancel→`__debugbreak`→无调试器→进程自杀"的根因。一个放置错误（`Can't set House near Position %d %d!!!`，来自战役结尾 switch `sub_41FB7A` 某 case）本应无害，却因这个共享 helper 被当成开发者断言而关掉整个游戏。
+- **EN**: The `int 3` at the tail of `sub_47A14D` (the shared wrapper for all `Warning!` boxes) is the root cause — Cancel triggers `__debugbreak`, which kills the process when no debugger is attached. A harmless placement error (`Can't set House near Position %d %d!!!`, from a case in the campaign-ending switch `sub_41FB7A`) was shutting down the whole game because this shared helper treats it as a developer assert.
+
+### 新增 / Added
+- **中文**：`Features/WarningLogFeature.cpp`（REGISTER_FEATURE 自注册 + `dllmain.cpp` include）。对 `sub_47A14D` 内唯一的 `call ds:MessageBoxA`（`0x47A1B8`，6 字节）做 trampoline hook：
+  - stub 读出已格式化的 `lpText`（`[ebp+8]`，如 `"Can't set House near Position 12 34!!!"`）与调用者返回地址（`[ebp+4]`）写入独立日志；
+  - 随后 `add esp,16` + `mov eax,1`（模拟按 OK / `IDOK=1`，使 `dec;dec` 得 -1 不触发 `int 3`） + `jmp 0x47A1BE` 续跑 —— **完全跳过弹框、不触发 `int 3`、且保留原函数光标恢复等副作用**。
+  - 所有 `Warning!` 调用者（7 处代码 + 虚表 `sub_478822`）均经此唯一 `MessageBoxA` 调用，一次 hook 全覆盖。
+- **中文**：`Core/Logger.{h,cpp}` 新增独立 warning 日志：`WarnLogInit(dir,"GameWarnings.log")` + `WarnLogWrite(fmt,...)`（并行 `g_warnFile`/mutex，写 `logs/GameWarnings.log`，沿用既有 flush + `OutputDebugStringA` 模式）。日志每行形如 `[时间] caller=0x4xxxxxxx text=...`。
+
+### 修复 / Fixed
+- **中文**：`ForbidExit` 安全网 —— 1 字节补丁 `Patch::WriteU8(0x47A1C3, 0x90)` 把 `int 3`(CC) NOP 成 `nop`(90)。即便 hook 万一未装上，Cancel 也不再致命（返回值完全不变 → 对所有调用者零风险）。
+- **中文**：顺带发现 `sub_47A14D` 的死代码 bug —— `strcpy(Destination[26], lpText)` + `strcat(...aPressCancelToD)` 拼出"按 Cancel 调试"提示，但 `MessageBoxA` 实际传的是 `lpText` 而非 `Destination`（提示从不在框中显示，且对长文本会栈溢出）；因 `Destination` 未被使用，目前无害（属潜伏 bug，仅记录未修）。
+
+### 验证 / Verification
+- **中文**：编译通过（v141 cl.exe，EXIT=0，DLL 501760B）；完整部署（`build_deploy.sh`）成功，DLL 已落 `SAGA_GAME_HACK/plugins/CulturesGameExtend.dll`，功能默认全开（无需改 ini）。运行游戏触发任一 `Warning!` 后，`logs/GameWarnings.log` 应出现 `caller=0x... text=...` 行，且游戏不再因该警告关闭、弹框被静默跳过。
+
+### 配置 / Config
+```ini
+[WarningLog]
+Enabled = 1     ; 总开关
+ForbidExit = 1  ; 禁止退出（NOP int3 安全网）
+LogEnabled = 1  ; 记录日志（hook 接管 MessageBoxA）
+```
+
+### 关联产物 / Artifacts
+- **中文**：`logs/GameWarnings.log`（运行时生成，位于游戏目录 `logs/`）。
+
+---
+
 ## v0.4.0 — CulturesPatches 全量实现 + 运行期 code-cave 注入稳定（里程碑 / milestone，2026-08-13，commit `b426b73`）
 
 > 里程碑 / Milestone：从 `cultures-saga-patches`（Python 静态补丁权威源）完整落地到 C++ 运行期实现，并经用户实跑验证**不再崩溃**。版本锚 / Version anchor：`v2026-08-13-cultures-patches-runtime`。
