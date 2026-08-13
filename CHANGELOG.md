@@ -137,7 +137,94 @@ Enabled = 0        ; 1 = 无视 campaign.ini 解锁全部战役/关卡
 
 | 版本 | Commit | 日期 | 内容 |
 |---|---|---|---|
+| v0.4.0 | `b426b73` | 2026-08-13 | CulturesPatches 全量实现 + 运行期 code-cave 注入稳定（里程碑） |
+| v0.3.0 | - | 2026-08-11 | 文化II 战役屏加载 + 全解锁 Feature（里程碑） |
 | v0.2.0 | `ac68242` | 2026-08-10 | AsgardCampaign 战役入口按钮 |
 | v0.1.0 | `68d976e` | 2026-08-10 | 架构重构 + UserCampaigns + verify 机制 + build_deploy.sh |
 | - | `b8a9379` | - | 添加项目文件 |
 | - | `76a5f58` | - | 添加 .gitattributes / .gitignore / LICENSE |
+
+---
+
+## 附录 A：项目铁律与部署纪律 / Appendix A: Project Iron Rules & Deployment Discipline
+
+> 本节汇总跨特性、反复踩坑后固化的约定。完整细节见项目记忆 `MEMORY.md` 与各日日志。
+> This section distills cross-cutting conventions hardened after repeated pitfalls. Full detail lives in project memory `MEMORY.md` and the daily logs.
+
+### A.1 部署纪律 / Deployment Discipline
+- **中文**：`build_deploy.sh` 可能**静默编译失败**（grep 吞错）→ 每次部署后必须用 Python **字节级验证 DLL**（搜关键字符串）。配置/补丁（`*.ini`）必须与 DLL **同步部署**——旧 DLL + 新 ini 会导致 `bad byte '|'` 全跳过。
+- **EN**: `build_deploy.sh` can **silently fail to compile** (grep swallows errors) → after every deploy, **byte-verify the DLL** with Python (search key strings). Config/patches (`*.ini`) **MUST deploy together with the DLL** — an old DLL + new ini makes `bad byte '|'` skip everything.
+
+### A.2 code-cave 重定位铁律（CulturesPatches）/ Code-Cave Relocation Iron Rule
+- **中文**：把 blob 经 `VirtualAlloc(NULL)` 搬进独立页时，重定位必须**同时**处理两类引用：
+  1. **绝对自引用**（4 字节值落在 blob 窗口内）→ `+delta`；
+  2. **相对外跳**（`E9/E8/Jcc` 的 `rel32` 目标在 Game.exe 映像内）→ `rel32 -= delta`。
+  只做①漏② → 跳进 cave 零页执行 → 解引用 NULL 崩溃。**严禁** `VirtualAlloc(MEM_COMMIT, …)` 落在映像保留间隙 → `err=5 ACCESS_DENIED`。
+- **EN**: When relocating a blob into an independent page via `VirtualAlloc(NULL)`, relocation MUST handle **BOTH** kinds of references: (1) **absolute self-references** (4-byte values inside the blob window) → `+delta`; (2) **relative external jumps** (`E9/E8/Jcc` `rel32` whose target is inside the Game.exe image) → `rel32 -= delta`. Doing only (1) → jumps into the cave zero-page → NULL deref crash. **Never** `VirtualAlloc(MEM_COMMIT, …)` inside an image-reserved gap → `err=5 ACCESS_DENIED`.
+
+### A.3 地址约定 / Address Convention
+- **中文**：`gameapi::Va()` 收 **VA**（0x4xxxxx）；`Patch::WriteBytes(base+off)` 收 **RVA**。二者不可混用（曾因把 IDA VA 当 RVA 加 base 越界）。
+- **EN**: `gameapi::Va()` takes **VA** (0x4xxxxx); `Patch::WriteBytes(base+off)` takes **RVA**. Never mix them (once caused out-of-bounds by adding base to an IDA VA).
+
+### A.4 引擎层铁律 / Engine-Layer Iron Rules
+- **中文**：
+  - **logic 表重载**须重跑派生 resolver（`sub_415E8A` + `sub_412B62` 重建 `dword_510C60`），否则"无图标 / 物品放不进 / 采集空"；流程：影子表 → memcpy → resolver → 整表 diff 自校验。
+  - **naked stub** 调 C 函数后 `jmp __thiscall` 原函**必须还原 ecx(this)**（ebx 暂存）。
+  - **BlitGlyph 必须上界裁剪**（fbW/fbH），越界写即崩。
+  - **hook 外部对象指针前必须 VirtualQuery 守卫**（猜错=不渲染+日志，不踩内存）。
+  - c2m 联机传图整树递归打包无白名单（含 `logic\`，dotfile 除外）。
+- **EN**:
+  - **logic table reload** must re-run the derived resolver (`sub_415E8A` + `sub_412B62` rebuild `dword_510C60`), else "no icon / items can't be placed / gathering empty"; flow: shadow table → memcpy → resolver → whole-table diff self-check.
+  - A **naked stub** calling a C function then `jmp __thiscall` original **MUST restore ecx(this)** (stash in ebx).
+  - **BlitGlyph MUST clamp to upper bound** (fbW/fbH); out-of-bounds write crashes.
+  - **Before hooking an external object pointer, VirtualQuery-guard it** (wrong guess = no render + log, never stomp memory).
+  - c2m multiplayer map transfer packs the whole tree recursively with no allowlist (includes `logic\`, except dotfiles).
+
+### A.5 ini / 补丁配置约定 / ini & Patch Config Convention
+- **中文**：双语注释 = 同组先中文块后英文块，禁用 `|` 分隔、不逐行交叉；`patches.ini` 单一总开关 `[CulturesPatches] Enabled`，`patches/*.ini` 社区可直接增删。
+- **EN**: Bilingual comments = same group: Chinese block first then English block; never use `|` as separator, don't interleave line-by-line; `patches.ini` single master switch `[CulturesPatches] Enabled`; `patches/*.ini` can be added/removed by the community directly.
+
+---
+
+## 附录 B：TextRenderer 最终状态（摘要）/ Appendix B: TextRenderer Final State (Summary)
+
+> 富文本渲染 Feature，用户于 2026-08-12 确认 `v2026-08-12-richtext-compact` 正常。里程碑链：engine-color → tooltip-fixed → autoposition → **richtext-compact** (`762e9d5`)。完整细节见 `MEMORY.md` 的 "★★ TextRenderer 最终状态"。
+> Rich-text rendering Feature, user-confirmed `v2026-08-12-richtext-compact` normal on 2026-08-12. Milestone chain: engine-color → tooltip-fixed → autoposition → **richtext-compact** (`762e9d5`). Full detail in `MEMORY.md` "★★ TextRenderer 最终状态".
+
+### B.1 架构 / Architecture
+- **中文**：字形层 chokepoint hook `sub_439610`（原子 blit 汇合点，唯一文本汇合）+ `sub_439633`（字宽）——**全字符 GDI 接管**（ASCII 也接管，用户拍板）。
+- **EN**: Glyph-layer chokepoint hook `sub_439610` (atomic blit convergence, the only text convergence point) + `sub_439633` (glyph width) — **full GDI takeover of all characters** (ASCII included, per user decision).
+
+### B.2 `sub_439610` 调用约定【最终定案】/ Calling Convention [FINAL]
+- **中文**：`__thiscall`，`ecx`=字体对象；栈 5 参 `[ebp+8]`=颜色{aBGR}、`，` `[ebp+0xC]`=**DrawContext**、`[ebp+0x10]`=ch、`[ebp+0x14]`=x、`[ebp+0x18]`=y。跳板抄 6 字节 → `0x439616`。
+- **EN**: `__thiscall`, `ecx`=font object; 5 stack args `[ebp+8]`=color{aBGR}, `[ebp+0xC]`=**DrawContext**, `[ebp+0x10]`=ch, `[ebp+0x14]`=x, `[ebp+0x18]`=y. Trampoline copies 6 bytes → `0x439616`.
+
+### B.3 DrawContext 结构 / DrawContext Struct
+- **中文**：`+0x2C`=像素基址、`+0x30`=pitch(px)、`+0x08..0x14`=clip{x,y,w,h}、`+0x18`=**宽-1 非高度**、`+0x38`=pitch(字节)→bpp=`+0x38`/`+0x30`（**主界面 16bpp**，32bpp 双路径）、`+0x50`=等宽推进。真实高度靠 `ProbeFbHeight` 探测。
+- **EN**: `+0x2C`=pixel base, `+0x30`=pitch(px), `+0x08..0x14`=clip{x,y,w,h}, `+0x18`=**width-1 NOT height**, `+0x38`=pitch(bytes)→bpp=`+0x38`/`+0x30` (**main UI 16bpp**, dual path for 32bpp), `+0x50`=monospace advance. True height via `ProbeFbHeight`.
+
+### B.4 位置模型 / Position Model
+- **中文**：ASCII=半格(cellW/2)、CJK=全格(cellW)；slotW 渲染与 `OnGlyphWidth` 同步；垂直=`FontLineHeight(font[8]+2)` 自适应；水平 `kBearingX=3` 内置；持久表面(Tooltip, `ShouldSkipRepeat` 命中)用墨迹居中零偏移。
+- **EN**: ASCII=half cell (cellW/2), CJK=full cell (cellW); slotW render synced with `OnGlyphWidth`; vertical=`FontLineHeight(font[8]+2)` auto; horizontal `kBearingX=3` built-in; persistent surfaces (Tooltip, `ShouldSkipRepeat` hit) use centered ink zero-offset.
+
+### B.5 关键补丁与开关 / Key Patches & Toggles
+- **中文**：
+  - 词后空格修复 = **NOP `0x4CA612`**（`add [esi+38h],eax` → `90 90 90`），取消每词后空格宽 → 中文紧凑。★ `0x4CA612` 的 E9 hook 会让**全部文字消失**（连纯跳转 stub 也消失，机制未明）→ NOP 方案**禁用**。
+  - `WordSplitPatch=1` 启用（补丁① `0xD053B` 单字节化 → 富文本词=单字节 → 不超宽 → 长文本完整）；`SpaceHex` 实测词缓冲=单字节 GBK 首字节（E8 00），`=0` 时词=整段 → 超宽溢出/消失。
+  - `WordColStub`（`sub_4E21B7` 词收集 `0x4E2242`，CJK 单码点词）+ `OverflowStub`（`0x4E2267` 超宽词拆字）保留；补丁②（`0xE2251`）NOP 必死循环，**不可用**。
+  - `OnGlyphWidth` NUL 修复（`ch<=0→0`）：修词尾 `\0` 白加 9px（"分散"另一成因）；`HalfCellExtra=2` 定稿；`AntiAlias` 开关（无影响暂不动）。
+- **EN**:
+  - Word post-space fix = **NOP `0x4CA612`** (`add [esi+38h],eax` → `90 90 90`), cancels per-word trailing space width → compact CJK. ★ An E9 hook at `0x4CA612` makes **ALL text vanish** (even a pure-jump stub) — mechanism unknown → NOP approach **DISABLED**.
+  - `WordSplitPatch=1` active (patch① `0xD053B` single-byte → rich-text word=single byte → no overflow → full long text); `SpaceHex` measured word buffer = single-byte GBK lead (E8 00); `=0` → word=whole segment → overflow/vanish.
+  - `WordColStub` (`sub_4E21B7` word collect `0x4E2242`, CJK single-codepoint word) + `OverflowStub` (`0x4E2267` overflow word split) retained; patch② (`0xE2251`) NOP causes infinite loop — **unusable**.
+  - `OnGlyphWidth` NUL fix (`ch<=0→0`): fixes spurious +9px at word-end `\0` ("分散" other cause); `HalfCellExtra=2` finalized; `AntiAlias` toggle (no effect, untouched).
+
+### B.6 超链接 hover 整句变亮（08-13 定案）/ Hyperlink Hover Whole-Sentence Brighten (08-13 FINAL)
+- **中文**：hook `sub_4C9FC4`（token 重绘）入口 → `HoverRepaintStub`，`a4=1` **且** `token+32`（链接标志）≠0 才遍历。
+  - **`sub_4C9FC4` 调用约定【易错】**：`__thiscall(this=排版对象, a2=绘制surface, a3=token, a4=1 变亮)`。`a4` 必须=1 才变亮；`surface(a2)` 必须与原始调用同一对象。`HoverLinkRepaint` 必须 4 参 `repaint(self,surface,tok,1)`；少传 `a4` → 栈垃圾 → 既崩又静默失效。`token+36`=linkId（同链接词分组）。
+  - 排版结构：行列表头=排版对象+0x24、词列表头=行+0x08；迭代器 `sub_416CA0`(first)/`sub_4D0BE0`(next) `__thiscall`(ecx=state)，行/词各自独立 12 字节 state buffer。
+  - 排版对象 `this` 来自 `sub_4C9FC4` 的 ECX（pushad 后 `[esp+4]`），**不是 `[esp+24]`（ESI 垃圾）**——2884 崩溃根因。
+- **EN**: Hook `sub_4C9FC4` (token repaint) entry → `HoverRepaintStub`, `a4=1` **AND** `token+32` (link flag)≠0 to traverse.
+  - **`sub_4C9FC4` calling convention [error-prone]**: `__thiscall(this=layout obj, a2=draw surface, a3=token, a4=1 brighten)`. `a4` MUST be 1 to brighten; `surface(a2)` MUST be the same object as the original call. `HoverLinkRepaint` MUST be 4-arg `repaint(self,surface,tok,1)`; missing `a4` → stack garbage → both crash and silent no-op. `token+36`=linkId (group same-link words).
+  - Layout struct: line list head=layout obj+0x24, word list head=line+0x08; iterators `sub_416CA0`(first)/`sub_4D0BE0`(next) `__thiscall`(ecx=state), line/word each use independent 12-byte state buffer.
+  - The layout obj `this` comes from `sub_4C9FC4`'s ECX (after pushad `[esp+4]`), **NOT `[esp+24]` (ESI garbage)** — root cause of the 2884 crash.
