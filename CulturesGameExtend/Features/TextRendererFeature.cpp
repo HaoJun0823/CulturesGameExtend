@@ -1224,35 +1224,80 @@ extern "C" void __declspec(naked) SepStub() {
 // ★ 08-13 整句变亮修复：恢复 02:01 纯 UTF-8 码点词收集（hook 0x4D053A，5 字节 E9）。
 //   背景：单字节词缓冲（E4 00）无法渲染 → hover 变亮失效（用户 01:57 数据实锤）；
 //   整段词（g_inLink/TagEntryStub，02:17/07:09/07:23）连续空白，已弃用。
-//   本 stub：词 = **1 个完整 UTF-8 码点**（≤4 字节）→ 不超宽（长文本完整）+ 词缓冲完整
-//   （变亮可渲染 → 恢复 hover 变亮）。每个字符都 push 1Ch; jmp 0x4D053F 收尾，
-//   **绝不跳回 0x4D0516 循环头** → 0x4D053D（被 E9 覆盖为垃圾）永不可达 → 分隔符路径安全。
+//   本 stub：分两条路径——
+//     · ASCII：整词收集（扫描到分隔符止），并把尾随空格(0x20)纳入元素文本 →
+//       sub_43967D 对 0x20 按 sub_439633(0x69)='i' 宽(≈9px) 计量 → 元素自带词距（英文词间有空格）。
+//     · CJK：1 个完整 UTF-8 码点（≤4 字节）逐字 → 保任意位置折行 + 词缓冲完整（变亮可渲染）。
+//   任一路径都 push 1Ch; jmp 0x4D053F 收尾，**绝不跳回 0x4D0516 循环头** →
+//   0x4D053D（被 E9 覆盖为垃圾）永不可达 → 分隔符路径安全。
 //   寄存器契约（0x4D053A 时）：al=[edi]（0x4D0516 已读当前字符），esi=词起始，edi=扫描指针。
 //   反斜杠转义（\n 等）由 0x4D0530 原逻辑处理（本 hook 点 0x4D053A 在其后，见不到已结束的转义）。
 // ===================================================================
 extern "C" void __declspec(naked) CJKWordColStub() {
     __asm {
+        // 入口：al = [edi]（当前字符）；esi = 词起点（= 当前字符，由外层循环 0x4D0514 设置）。
+        // ★ 英文词距方案（绝不碰 0x4CA612）：ASCII 整词收集，把尾随空格纳入元素文本 →
+        //   sub_43967D 对 0x20 按 sub_439633(0x69)='i' 宽(≈9px) 计量 → 元素自带词距，与原始引擎一致。
+        //   CJK 仍逐码点（保任意位置折行），不加尾随空格 → 紧凑。
+        //   元素文本由 sub_4CFDD5 拷贝为 Count+1 空终止缓冲，吞空格不越界。
         cmp  al, 0x80
-        jb   L_wc_ascii          // 0x00-0x7F ASCII：1 字节
-        cmp  al, 0xC0
-        jb   L_wc_ascii          // 0x80-0xBF 游离续字节（理论不出现，保守 1 字节）
-        cmp  al, 0xE0
-        jb   L_wc_2
-        cmp  al, 0xF0
-        jb   L_wc_3
-        add  edi, 4              // 4 字节码点
-        jmp  L_wc_end
-    L_wc_2:
-        add  edi, 2
-        jmp  L_wc_end
-    L_wc_3:
-        add  edi, 3
-        jmp  L_wc_end
-    L_wc_ascii:
-        inc  edi
+        jae  L_wc_cjk            // >=0x80 → CJK 码点路径（逐字，无尾随空格）
+    // ---- ASCII 整词扫描（含尾随空格）----
+        mov  ecx, edi           // 扫描指针从当前字符起
+    L_wc_scan:
+        mov  al, byte ptr [ecx]
+        cmp  al, 0
+        je   L_wc_end           // 字符串结束 → 词尾（无空格）
+        cmp  al, 32
+        je   L_wc_space         // 空格 → 词尾，并把空格纳入元素（自带 9px 词距）
+        cmp  al, 9
+        je   L_wc_end           // tab → 词尾
+        cmp  al, 10
+        je   L_wc_end           // LF
+        cmp  al, 13
+        je   L_wc_end           // CR
+        cmp  al, 60
+        je   L_wc_end           // '<' 标签
+        cmp  al, 92
+        je   L_wc_bs            // '\' 转义
+        cmp  al, 0x80
+        jae  L_wc_end           // CJK（>=0x80）→ 词尾（中文后不强行加距）
+        inc  ecx                // ASCII 非分隔符 → 属同一词
+        jmp  L_wc_scan
+    L_wc_bs:
+        cmp  byte ptr [ecx + 1], 0x6E   // 下一字节是 'n'？
+        je   L_wc_end            // '\n' → 词尾
+        inc  ecx                 // 孤立反斜杠 → 视为词内字符
+        jmp  L_wc_scan
+    L_wc_space:
+        inc  ecx                // 空格纳入元素长度（元素文本含尾随空格）
     L_wc_end:
-        push 1Ch                 // ★ 覆盖的原 0x4D053D: push 1Ch（operator new 参数）
-        mov  eax, 4D053Fh        // 跳 0x4D053F（call operator new，完整保留）
+        mov  edi, ecx           // edi = 元素尾（空格情形已含空格；其余止于分隔符）
+        push 1Ch                // 原 0x4D053D 语义：push 1Ch（operator new 参数）
+        mov  eax, 4D053Fh       // 跳 0x4D053F（call operator new，完整保留）
+        jmp  eax
+    // ---- CJK 逐码点（与旧逻辑一致，无尾随空格）----
+    L_wc_cjk:
+        cmp  al, 0xC0
+        jb   L_wc_cjk1
+        cmp  al, 0xE0
+        jb   L_wc_cjk2
+        cmp  al, 0xF0
+        jb   L_wc_cjk3
+        add  edi, 4
+        jmp  L_wc_cjk_fin
+    L_wc_cjk3:
+        add  edi, 3
+        jmp  L_wc_cjk_fin
+    L_wc_cjk2:
+        add  edi, 2
+        jmp  L_wc_cjk_fin
+    L_wc_cjk1:
+        inc  edi
+        jmp  L_wc_cjk_fin
+    L_wc_cjk_fin:
+        push 1Ch
+        mov  eax, 4D053Fh
         jmp  eax
     }
 }
