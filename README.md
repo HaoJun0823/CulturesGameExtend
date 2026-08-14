@@ -1,5 +1,21 @@
 # CulturesGameExtend
 
+> **License: GNU General Public License v3.0-or-later (GPL-3.0-or-later)**
+> Copyright (C) 2026 CulturesGameExtend & CulturesGameLocalization 贡献者
+>
+> This project is free software released under the GPL-3.0-or-later. You may
+> redistribute and/or modify it under the terms of the GNU General Public License as
+> published by the Free Software Foundation. See [`LICENSE.txt`](./LICENSE.txt).
+>
+> **Upstream / third-party attribution (license retained):**
+> - Map format tooling (`cif2ini`, `c2mextracter`, `map.dat`/`c2m` converters) is based
+>   on **Mikulus6/Cultures-map-editor** (GPL-3.0) and the **Cultures2-dat-format**
+>   project, both derived from the 2010 XeNTaX forums cif research. Original copyright
+>   notices of those projects are preserved in their respective source files under
+>   `maptools/` and `Tools/`.
+> - Any code added by the contributors of *CulturesGameExtend* / *CulturesGameLocalization*
+>   is Copyright (C) 2026 the respective contributors and licensed under GPL-3.0-or-later.
+
 A community extension DLL for **Cultures** / **Cultures 2: Gates of Asgard** (the
 *Gates of Asgard* / *Die Saga* line by Funatics). It is loaded into the game
 process by a `dinput8.dll` proxy and adds a configurable set of features on top
@@ -270,3 +286,32 @@ Practical guidance for translators / modders:
 ## License
 
 See `LICENSE.txt`.
+
+---
+
+## Upstream Credits / 上游致谢
+
+This project's map-format tooling (and documentation) is derived from the
+**Cultures2-dat-format** project. The exact scope of what was reused depends on
+the files and links referenced in that upstream repository; we thank its
+contributors for their research and tooling.
+
+### Contributors（上游贡献者）
+
+- [Mikulus](https://github.com/Mikulus6): Managed project and wrote Python code.
+- [Basssiiie](https://github.com/Basssiiie): Decompiled parts of the game's engine via Ghidra.
+- [Rumu](https://github.com/Rumu121/): Helped with empirical verifications in game.
+- [Push42](https://github.com/push42): Helped with walk sectors data interpretation.
+
+### Literature（上游文献）
+
+- [Watto](https://github.com/wattostudios): "*Game Extractor*" (2004)
+- [Bacter](mailto:the.bacter@gmail.com): "*Unknown Encryption In Cultures Game*" (2010) — <https://web.archive.org/web/20210724220815/https://forum.xentax.com/viewtopic.php?t=3711>
+- [Red Blob Games](https://www.redblobgames.com/): "*Hexagonal Grids*" (2013) — <https://www.redblobgames.com/grids/hexagons/>
+- [Siguza](https://github.com/Siguza): "*Cultures 2 file formats*" (2013) — <https://web.archive.org/web/20210724220815/https://forum.xentax.com/viewtopic.php?t=10705>
+- [Nithanim](https://github.com/Nithanim): "*Northland or 8th Wonder of the World map.dat file format*" (2019) — <https://gist.github.com/Nithanim/766c31475377b0bd594bab974a1de8d2>
+- [Martianboy](https://github.com/martianboy): "*cultures2-engine*" (2020) — <https://github.com/martianboy/cultures2-engine>
+- [Mikulus](https://github.com/Mikulus6): "*Cultures map editor*" (2025) — <https://github.com/Mikulus6/Cultures-map-editor>
+
+> *Cultures* is the property of [Funatics Development](https://www.funatics.de/) with all
+> rights reserved; it is not covered by the GPL-3.0-or-later license.
