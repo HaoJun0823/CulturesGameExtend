@@ -6,6 +6,52 @@
 
 ---
 
+## v0.6.0 — PerMapLogic 重载稳定化 + 4 个崩溃守卫 Feature（里程碑 / milestone，2026-08-21，commit `156bf89`）
+
+> 里程碑 / Milestone：PerMapLogic 重载功能从"多轮对话不稳定、重载即崩 #DE"变为**实机验证稳定**——`campaign_01_01` 重载 12/12 表且运行时自校验 `dwords changed vs pre-reload = 0`（per-map 表与 global 逐字节一致），全程零崩溃、零新 dump。版本锚 / Version anchor：`v2026-08-21-permaplogic-stable`。
+> Milestone: the PerMapLogic reload feature went from "unstable across many dialogues, crashing on reload (#DE)" to **verified stable** — `campaign_01_01` reloads 12/12 tables with a runtime self-check `dwords changed vs pre-reload = 0` (per-map tables byte-identical to global), zero crash, zero new dump.
+
+### 背景 / Background
+- **中文**：重载崩溃根因是 **per-map 数据损坏**（2026-08-14 批量生成时动物段整体平移一位：global `chicken` 落槽 30、per-map 落槽 29），叠加派生 resolver 未在重载后重建 → 所有按索引缓存的槽位错位 → `#DE` / `atomicanimations` 越界 AV。此前应急的 DivZeroGuard（SKIP 思路）被用户明确不认可其根因处理；真正根治须走"数据保真 + 重载后重建全部派生 resolver"，而非"去缓存"或"SKIP 兜底"。
+- **EN**: The reload crash root cause was **corrupt per-map data** (a 2026-08-14 batch-generation bug shifted the animal segment by one: global `chicken` at slot 30, per-map at 29), compounded by derived resolvers not being rebuilt after reload → every index-cached slot misaligned → `#DE` / `atomicanimations` OOB AV. The earlier emergency DivZeroGuard (SKIP approach) was explicitly judged by the user as not addressing the root cause; the real fix is "faithful data + rebuild all derived resolvers after reload", not "remove cache" or "SKIP".
+
+### 新增 / Added
+- **中文**：`PerMapLogicFeature::ReloadLogicForMap()` 末尾统一重建全部按索引缓存的派生 resolver：
+  - `sub_415E8A()` 重解 good→landscape +36 句柄（仅当景观表非空）；
+  - `sub_412B62()` 重建 land→goodid 索引（`dword_510C60`）；
+  - 调用点加合理性守卫：loader 函数指针须在 `[0x400000,0x600000)` 否则降级为日志 SKIP，杜绝 `call 1` 类越界执行。
+- **中文**：4 个守卫 Feature（REGISTER_FEATURE 自注册，dllmain.cpp include）：
+  - `AnimalTypeGuardFeature` — **根因修复**：实体创建入口 `sub_40ADB1` 校验 movespeed 索引（= `sub_40AF62(name)` 解析结果）==0 则 `return -1`，游戏自有链路干净跳过坏 animaltype（不创建、不留残废对象），根治 `EXCEPTION_INT_DIVIDE_BY_ZERO (0xC0000094)` 家族（Game.exe.42700/24464/22816）。
+  - `AtomicAnimGuardFeature` — `atomicanimations` 表索引越界守卫：`sub_42E38A` 内层循环读垃圾子元素计数越界 AV（Game.exe.32664.dmp）；洞穴校验 `this->0x78 < dword_5112F8`，越界跳游戏自有早退点 `0x42E646`。
+  - `CustomSafetyPatchesFeature` — `sub_493EF2` 两处 `div` 字节防护（独立于上游 CulturesPatches，配置放 `CulturesGameExtend_CustomSafety.ini`，便于未来同步上游）。
+  - `DivZeroGuardFeature` — `0x42DE1F` / `0x446EAF` 两处 `idiv` 除零兜底（运行期代码洞穴做 `divisor==0 跳过`）。**防御纵深**，dllmain 注释已明确标注其 SKIP 性质（停除法但留 movespeed=0 残废实体），非根因方案；真正的根因修复是 `AnimalTypeGuard`。
+- **中文**：`tools/scan_comment_splice.py` — 扫描 `// 注释\` 行尾反斜杠吞行隐患（C/C++ 阶段 2 行拼接会把下一行代码并入注释 → 数组/结构体静默少编译一项 → 运行期错位崩溃）。
+- **中文**：`Paths.h` 新增 `kCustomSafetyIni`；`dllmain.cpp` 加载 `CulturesGameExtend_CustomSafety.ini` 并 merge 入主配置。
+
+### 修复 / Fixed
+- **中文**：编译开关 `/we4010` 把"注释行尾反斜杠"从警告升级为错误，从编译期卡死该隐患；`build_deploy.sh` 新增 [1.5/3] `grep landscapetypes.ini` 安全网——若 `kLogicFiles` 少编译 1 项则立即 `exit 1`，而非等游戏崩（对应 5688 dump 根因）。
+- **中文**：`build_deploy.sh` [4/4] 本地化拷贝包进 `set +e` + `|| echo`，单个 `cp` 失败（如文件被锁、`_build/DataX` 缺失）不再中止整个部署——崩溃修复的 DLL 已在 [2/3] 落地。
+- **中文**：字体资源 `Resource/plugins/fonts/l10.ini` → `l11.ttf`（字体切换）。
+
+### 验证 / Verification
+- **中文**：用户实跑 `campaign_01_01` 等图：**无崩溃**；`logs/CulturesGameExtend.log` 仅 INFO 级，`[resolver]` 每次重载后都正确重建、`[diff] dwords changed vs pre-reload = 0`、0 条 `Dropped animaltype entity`、AnimalTypeGuard 全程未触发；per-map `tribetypes.ini` 与 global 逐字节一致（chicken 槽 30/30 对齐）。
+- **中文**：下游 `Data/` 侧数据修复（301 个 per-map 文件重生成 global 忠实副本、回滚 type 42 adult_animal 非白名单区块）属运行期数据层，本仓库不含游戏 `Data/`，此处仅记录源码层根治；详见项目记忆 `MEMORY.md` 的 "PerMapLogic 崩溃根因"。
+
+### 配置 / Config
+```ini
+[AnimalTypeGuard]
+Enabled = 1     ; animaltype 除零崩溃根因修复（C 兜底）
+
+[CustomSafetyPatches]
+Enabled = 1
+```
+（DivZeroGuard / AtomicAnimGuard 默认随 Feature 注册，开关见各自 `[...]` 段；CustomSafety 补丁明细见 `Resource/plugins/config/custompatches/`）
+
+### 关联产物 / Artifacts
+- **中文**：`tools/scan_comment_splice.py`（注释吞行扫描器）；`Resource/plugins/config/CulturesGameExtend_CustomSafety.ini` + `custompatches/`（自定义安全补丁）；`Resource/plugins/fonts/l11.ttf`（字体资源）。
+
+---
+
 ## v0.5.0 — WarningLog：记录 Warning! 开发者断言框 + 禁止其关闭游戏（里程碑 / milestone，2026-08-13，commit `d73dac7`）
 
 > 里程碑 / Milestone：根治 `Warning!` 弹框（实为开发者 assert 残留）在玩家按 Cancel/X/Esc 时 `__debugbreak` → 无调试器 → 进程自杀的问题。版本锚 / Version anchor：`v2026-08-13-warninglog`。
