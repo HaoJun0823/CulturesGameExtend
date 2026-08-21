@@ -28,6 +28,35 @@
 
 #include "Features/MapLoaderExtraFeature.cpp"
 
+// 自定义安全补丁（独立于上游 CulturesPatches，纯字节防护 sub_493EF2 两处 div）
+// Custom safety patches (independent of upstream CulturesPatches; byte-guards the
+//   two div sites in sub_493EF2). Included here like every other Feature .cpp.
+#include "Features/CustomSafetyPatchesFeature.cpp"
+
+// 除零防护：per-map logic 重载索引失配导致类型索引 0 透传，在 0x42DE1F / 0x446EAF
+// 两处 idiv 触发 #DE 的兜底。运行时代码洞穴做「divisor==0 跳过」条件守卫。
+// 注意：这是 SKIP 思路（停除法但留 movespeed=0 的残废实体），用户不认可其根因处理；
+// 真正根治见下方 AnimalTypeGuardFeature（实体创建入口校验早退，干净跳过坏实体）。
+// Div-zero guard: fallback for the per-map logic reload index-mismatch #DE at
+//   0x42DE1F / 0x446EAF. Runtime code cave performs a "divisor==0 -> skip" guard.
+// NOTE: this is the SKIP approach (stops the division but leaves a broken entity);
+//   the real root-cause fix is AnimalTypeGuardFeature below.
+#include "Features/DivZeroGuardFeature.cpp"
+
+// animaltype 除零根治：实体创建入口 sub_40ADB1 校验 a3（movespeed 索引 = sub_40AF62
+// 解析结果）==0 则直接 return -1，游戏自有链路干净跳过该实体（非残废对象）。
+// AnimalType guard: at entity-creation entry sub_40ADB1, if a3 (movespeed index =
+//   sub_40AF62 result) == 0, return -1 so the game cleanly skips the entity.
+#include "Features/AnimalTypeGuardFeature.cpp"
+
+// atomicanimations 表索引越界守卫：重载后实体持有的旧表索引越界，使 sub_42E38A
+// 内层循环读垃圾计数越界 AV（Game.exe.32664.dmp）。洞穴校验 this->0x78 < dword_5112F8，
+// 越界则跳游戏自有早退点 0x42E646。
+// AtomicAnimGuard: per-map-logic reload leaves entities with stale table indices;
+//   sub_42E38A then loops on a garbage sub-element count and AVs (Game.exe.32664.dmp).
+//   Cave checks this->0x78 < dword_5112F8, else jumps to the game's own early-out 0x42E646.
+#include "Features/AtomicAnimGuardFeature.cpp"
+
 #pragma region Log level parsing
 // Map log level string -> enum
 namespace {
@@ -143,6 +172,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             pcfg->Merge(patchesIni);
         // 非官方补丁配置（独立成文件），合并到主配置之上。
         // 该文件包含 [CulturesPatches] 与各 code cave 补丁开关。
+        }
+        // 自定义安全补丁配置（独立于上游 CulturesPatches，便于未来同步上游）。
+        // Custom safety patch config (independent of upstream CulturesPatches).
+        IniConfig customSafetyIni;
+        if (customSafetyIni.Load(ge_paths::CustomSafetyIniPath())) {
+            pcfg->Merge(customSafetyIni);
         }
         HANDLE hThread = CreateThread(nullptr, 0, RunExtendThread, pcfg, 0, nullptr);
         // Continue without INI (use defaults); logging is initialized later on the worker thread.

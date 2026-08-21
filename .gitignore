@@ -373,3 +373,6 @@ FodyWeavers.xsd
 *.exe
 *.lib
 *.exp
+
+# Local temp scratch dir (never part of the source repo)
+.temp/

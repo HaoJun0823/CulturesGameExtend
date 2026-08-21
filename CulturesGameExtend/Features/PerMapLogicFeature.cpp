@@ -15,25 +15,25 @@
 //   tribetypes\tribetypes.ini、atomicanimations\atomicanimations.ini ...）。
 //   某文件缺失 -> 自动回退全局 data\logic\<同名>；整图无 logic\ -> 完全原版。
 //
-// 机制（2 个 hook，全部驻留 DLL）：
+// 机制（2 个 hook + 1 个尾部改写，全部驻留 DLL）：
 //   1. IniFile_Open(0x424EF8) 入口 trampoline：重载会话(g_redirect=1)期间，
 //      把 12 个 data\logic\X.ini 改写为 <地图源目录>\logic\X.ini。
 //      ★ 存在性用纯 Win32 GetFileAttributesA 判断（v2.2 起弃用引擎
 //        sub_40667B 探测：它开/关 CRT fd + 归档搜索，在 IniFile_Open 入口
 //        嵌套调用会扰动文件层 -> goodtypes 等表加载失败，症状=物品图标消失）。
-//   2. MapLoader_LoadCurrentMap 收尾调用点 **0x40AA13**（call sub_407A21）hook：
-//      改写 E8 -> PrepCallStub，在**地图 ini/世界/[StaticObjects] 全部处理完、
-//      开局准备之前**执行 ReloadLogicForMap（依依赖顺序重跑 12 个 loader），
-//      再 jmp 原 sub_407A21 正常开局。
-//      ★ v3（0x40AA13）是调试器实机验证后的最终触发点：v2.2-2.5 的
-//        0x40A81A/0x40A6F4 触发点会让紧随其后的 $maproot$\map.ini 打开失败
-//        （句柄全零，节表缺失）-> [StaticObjects] 全部被跳过 -> 地图开局
-//        物件/资源全空。收尾点重载只影响运行时读取，不再有这个问题。
-//      地图源目录从加载器帧 [ebp+8]=Source 取得。
-//   3. manager 指针直接读各 loader 存储的全局（无入口 hook，无启动竞态）。
-//   ★ v2.4：重跑后把 10 张恒定大小表的新内容**拷回原表地址并恢复原指针**
-//     （缓存了表指针的子系统不会因重载而失效；atomicanim/tribe/weapon 为
-//     动态大小跳过）。v2.5 保留拷回，确保指针身份稳定。
+//   2. MapLoader_LoadCurrentMap 入口（0x40A6F4）hook -> PrepMapEntryStub：
+//      抓取地图源目录（g_mapSrc）并**在游戏创建任何 unit/building 之前**
+//      （即早于 sub_41D290 的 [StaticObjects] 解析）重载全部 12 张 logic 表。
+//      新实体按 per-map 正确索引诞生 -> 根除 32664 崩溃（旧方案在实体已存在
+//      之后才重载 -> 索引失配 -> 空指针）。
+//      ★ 0x40A6F4 已字节校验通过（稳定）；重载会话内 g_redirect 紧密封装
+//        （进 ReloadLogicForMap 设 1、出设 0），不会误伤紧随其后的 map.ini。
+//   3. MapLoader 收尾调用点 0x40AA13（call sub_407A21）改写为 PrepCallStub：
+//      仅抓取地图身份后 jmp 原 sub_407A21 正常开局，此处**不再重载**。
+//   （曾尝试 hook sub_41D290 在建实体前重载：当前运行版 Game.exe 该 VA 的
+//    prologue 与 IDA .i64 不一致、VerifyBytes 必失败，故弃用、迁回 0x40A6F4。）
+//   manager 指针直接读各 loader 存储的全局（无入口 hook，无启动竞态）。
+//   ★ 当前不再做「拷回原表地址」（重载发生在建实体之前，无指针身份问题）。
 //
 // 多人：地图包（含 logic\）整包传输到对方 -> 双方同版本 DLL + 同图 =
 //       同平衡，天然一致。
@@ -65,7 +65,7 @@
 //   A missing file -> auto fall back to global data\logic\<same>; a map with no
 //   logic\ at all -> completely vanilla.
 //
-// Mechanism (2 hooks, both resident in the DLL):
+// Mechanism (2 hooks + 1 tail patch, all resident in the DLL):
 //   1. IniFile_Open(0x424EF8) entry trampoline: during a redirect session
 //      (g_redirect=1), rewrite the 12 data\logic\X.ini paths to
 //      <map source dir>\logic\X.ini.
@@ -73,22 +73,21 @@
 //        using the engine's sub_40667B probe: it opens/closes CRT fds and does
 //        archive searching; calling it nested inside IniFile_Open's entry perturbs
 //        the file layer -> goodtypes etc. fail to load, symptom = icons vanish).
-//   2. MapLoader_LoadCurrentMap tail call site **0x40AA13** (call sub_407A21) hook:
-//      rewrite E8 -> PrepCallStub, which runs ReloadLogicForMap AFTER the map
-//      ini/world/[StaticObjects] are fully processed and BEFORE game-prep, then
-//      jmp to the original sub_407A21 to start normally.
-//      * v3 (0x40AA13) is the final trigger point validated on-device with a
-//        debugger: the v2.2-2.5 trigger points 0x40A81A/0x40A6F4 made the
-//        immediately-following $maproot$\map.ini open fail (zero handle, missing
-//        section table) -> [StaticObjects] all skipped -> map starts empty.
-//        Tail reload only affects runtime reads, no such problem.
-//      The map source dir is taken from the loader frame [ebp+8]=Source.
-//   3. manager pointers are read directly from the globals each loader stores
-//      (no entry hook, no startup race).
-//   * v2.4: after re-running, copy the 10 fixed-size tables' new content BACK to
-//      the original table address and restore the original pointer (subsystems
-//      that cached the table pointer don't break; atomicanim/tribe/weapon are
-//      dynamic-size and skipped). v2.5 keeps the copy-back for pointer stability.
+//   2. MapLoader_LoadCurrentMap entry (0x40A6F4) -> PrepMapEntryStub:
+//      captures the map source dir (g_mapSrc) AND reloads all 12 logic tables
+//      pre-entity (strictly before sub_41D290 creates units/buildings -> correct
+//      per-map indices, no 32664 NULL-deref). g_redirect is tightly scoped inside
+//      ReloadLogicForMap (set 1 on entry, 0 on exit) so map.ini is never redirected.
+//   3. MapLoader tail call site (0x40AA13, call sub_407A21) -> PrepCallStub:
+//      captures the map identity, then jmp to the original sub_407A21 to start
+//      normally. The reload NO LONGER happens here (placing it after entities were
+//      created caused the 32664 NULL-deref from stale indices).
+//   (The sub_41D290 hook was retired: its prologue no longer matches the running
+//    Game.exe build, so VerifyBytes always failed; reload moved to 0x40A6F4.)
+//      Entities are then born with the correct per-map indices -> kills 32664.
+//      sub_41D290 is called only from sub_41D0E3 (once per map), so timing is exact.
+//      * v2.4 copy-back of the 10 fixed-size tables was REMOVED: it is unnecessary
+//        before entities exist, and the kTables address table was partly wrong.
 //
 // Multiplayer: the map package (including logic\) is transferred wholesale to the
 //   peer -> both sides on same DLL version + same map = same balance, consistent
@@ -133,6 +132,8 @@ constexpr uintptr_t VA_PrepCall     = 0x40AA13;
 constexpr uintptr_t VA_GameplayPrep = 0x407A21;
                                                   //   在 [StaticObjects] 解析之前 -> 地图开局资源按新表解析）
                                                   //   before [StaticObjects] parsing -> map starts with new table)
+// (VA_StaticObjects 0x41D290 retired: the sub_41D290 hook was removed because its
+//  prologue no longer matches the running Game.exe build; reload is at MapLoader entry 0x40A6F4)
 struct LogicFile {
 // MapLoader 末尾 call sub_407A21（其余 11 表重载点）
 // MapLoader tail call sub_407A21 (reload point for other 11 tables)
@@ -149,7 +150,8 @@ struct LogicFile {
 };
 static const LogicFile kLogicFiles[] = {
 // 相对 data\logic\ 的路径
-// path relative to data\logic\
+// path relative to data\logic  (注意：注释行尾不能留反斜杠，否则 C/C++ 预处理
+// 阶段 2 的行拼接会把下一行代码吞进注释，导致本数组少编译 1 项，循环却按 12 跑)
     { "landscapetypes.ini",                     0x4162E5, 0x511534 },
     { "trianglepatterntypes.ini",               0x415EBB, 0x5114C4 },
 // loader 函数 VA
@@ -167,13 +169,18 @@ static const LogicFile kLogicFiles[] = {
     { "animaltypes.ini",                        0x412C52, 0x510F30 },
     { "humanjobexperiencetypes.ini",            0x412855, 0x510C20 },
 };
+// 数组项数常量——永远用 sizeof 推导，绝不留魔法数字 12。
+// 一旦少编译一项（如注释反斜杠吞行），这里与下面的循环边界会同时缩小，
+// 而不是「数组 11 项、循环 12 次」这种错位崩溃。
+static const int kNumLogicFiles = (int)(sizeof(kLogicFiles) / sizeof(kLogicFiles[0]));
 static volatile unsigned char g_redirect = 0;
 static bool   g_installed = false;
 static bool   g_dbg       = true;
-static char   g_canonical[12][64] = { {0} };
+static char   g_canonical[kNumLogicFiles][64] = { {0} };
 static char   g_candidate[MAX_PATH] = { 0 };
 static void*  p_tramp_inopen    = nullptr;
 static void*  p_tramp_maploader = nullptr;
+// (p_tramp_statobj retired together with the sub_41D290 hook)
 
 // ---- 运行期状态（stub 引用，需稳定地址）----
 #pragma endregion
@@ -184,7 +191,6 @@ static void*  p_orig_407A21     = nullptr;
 // IniFile_Open redirect-session switch
 static void*  p_pathrewrite  = nullptr;
 static void*  p_reload       = nullptr;
-static void*  p_reload_entry = nullptr;
 static void*  g_mapSrc  = nullptr;
 // data\logic\X.ini 规范路径
 // canonical data\logic\X.ini paths
@@ -193,7 +199,7 @@ static char   g_mapSrcStr[MAX_PATH] = { 0 };
 // PathRewrite 输出缓冲
 // PathRewrite output buffer
 static bool   g_mapHasLogic = false;
-static const char* kReloadKeys[12] = {
+static const char* kReloadKeys[kNumLogicFiles] = {
 // IniFile_Open 原入口 trampoline
 // IniFile_Open original-entry trampoline
     "ReloadLandscapetypes",         "ReloadTrianglepatterntypes",
@@ -209,7 +215,7 @@ static const char* kReloadKeys[12] = {
 // -> PathRewrite
 // -> PathRewrite
 };
-static bool g_reload[12] = { true, true, true, true, true, true,
+static bool g_reload[kNumLogicFiles] = { true, true, true, true, true, true,
 // -> ReloadLogicForMap
 // -> ReloadLogicForMap
                              true, true, true, true, true, true };
@@ -217,6 +223,24 @@ static void* g_shadowGood = nullptr;
 // -> ReloadGoodTypesAtEntry
 // -> ReloadGoodTypesAtEntry
 static unsigned char g_goodSnap[0x35A0];
+
+// ---- 已废弃：v3.7 "重载隔离栈"（2026-08-20 移除）----
+//   曾用 `mov esp, <VirtualAlloc 缓冲>` 把 12 个 logic loader 搬到独立 1MB 栈上跑。
+//   致命错误：裸切 esp 不会同步更新 TEB 里的栈边界
+//   (NT_TIB.StackBase/StackLimit)，操作系统的栈校验与 SEH 分派随即失效 ——
+//   一旦重载期间发生任何异常/探测，就得到非标准异常码 0x0、EIP 落在
+//   KERNELBASE/ntdll、段寄存器被污染（SegCs=0x6e0b0023）。dump 4540 / 36288
+//   即由此产生。且崩溃根因本非深栈：实测主栈仅用 5.2KB / 105.9KB（1MB 保留）。
+//   结论：绝不要在不接管 TEB 的前提下切换栈。已恢复为直接调用。
+// ---- REMOVED: the v3.7 "reload isolation stack" (2026-08-20) ----
+//   It used a raw `mov esp, <VirtualAlloc buffer>` to run the 12 logic loaders on a
+//   private 1MB stack. FATAL FLAW: switching esp without also updating the TEB stack
+//   bounds (NT_TIB.StackBase/StackLimit) breaks OS stack validation and SEH dispatch.
+//   Any exception/probe during the reload then yields a bogus exception code 0x0, EIP
+//   inside KERNELBASE/ntdll and trashed segment registers (SegCs=0x6e0b0023) --
+//   exactly what dumps 4540 / 36288 show. Besides, the original crash was never a
+//   deep-stack issue: measured main-stack usage was only 5.2KB / 105.9KB out of 1MB.
+//   Lesson: never switch stacks without taking over the TEB. Restored to direct calls.
 struct ImmPatch { uintptr_t va; int immOff; };
 // MapLoader arg1 Source（官方/用户文件夹图=地图源目录串）
 // MapLoader arg1 Source (official/user folder map = map source dir string)
@@ -318,7 +342,12 @@ static bool GoodTypesOverrideDiffers() {
 // 68 imm32        push offset dword_511420（memset 清指针）
 // 68 imm32        push offset dword_511420 (memset clears pointer)
     bool diff = false;
-    char b1[8192], b2[8192];
+    // 搬到堆：原 char b1[8192], b2[8192] 在入口重载的最深栈上占 16KB，会加剧
+    // 潜在栈溢出。改 std::vector 释放栈压（行为不变：仍按块比对两文件）。
+    // Moved to heap: the original 16KB stack buffers deepened the stack at the
+    //   entry reload and aggravated a latent stack overflow. std::vector keeps
+    //   behavior identical (chunked byte-compare of the two files).
+    std::vector<char> b1(8192), b2(8192);
 // A3 imm32        mov  dword_511420, eax（写新表指针）
 // A3 imm32        mov  dword_511420, eax (write new table pointer)
     DWORD total = 0;
@@ -326,11 +355,11 @@ static bool GoodTypesOverrideDiffers() {
 // FF 35 imm32     push dword_511420（strcpy "none"）
 // FF 35 imm32     push dword_511420 (strcpy "none")
         DWORD r1 = 0, r2 = 0;
-        ReadFile(hp, b1, sizeof(b1), &r1, nullptr);
+        ReadFile(hp, b1.data(), (DWORD)b1.size(), &r1, nullptr);
 // 8B 0D imm32     mov  ecx, dword_511420（解析读表）
 // 8B 0D imm32     mov  ecx, dword_511420 (parse reads table)
-        ReadFile(hq, b2, sizeof(b2), &r2, nullptr);
-        if (r1 != r2 || memcmp(b1, b2, r1) != 0) { diff = true; break; }
+        ReadFile(hq, b2.data(), (DWORD)b2.size(), &r2, nullptr);
+        if (r1 != r2 || memcmp(b1.data(), b2.data(), r1) != 0) { diff = true; break; }
 // A1 imm32        mov  eax, dword_511420（字段写）
 // A1 imm32        mov  eax, dword_511420 (field write)
         if (r1 == 0) break;
@@ -452,22 +481,31 @@ static void ReloadGoodTypesAtEntry() {
     }
     g_goodAtEntryLoaded = true;
     g_goodAtEntryOverridden = false;
-    if (g_mapHasLogic && GoodTypesOverrideDiffers()) {
-
-    // 自校验：对比重载前后整表。理想结果 = 只有 ini 里真正改过的字段有差异。
-    //   若出现别的偏移变成 0/-1，说明还有运行期回填字段被 memcpy 清掉（继续修）。
-
-    // Self-check: compare the whole table before/after reload. Ideal result = only
-    //   the fields actually edited in the ini differ. If other offsets become 0/-1,
-    //   another runtime-filled field was cleared by the memcpy (keep fixing).
+    if (g_mapHasLogic) {
+        // ★ goodtypes 在入口无条件处理一次，绝不 SKIP —— 用户要求的根本性修复
+        //   （"如果 goodtypes.ini 变化怎么办？"）。实测主栈占用仅 5.2KB / 1MB，
+        //   深栈溢出的假设已被 dump 数据推翻，因此直接在调用方栈上执行即可。
+        //   - 覆盖存在且与全局不同 -> 读 MAP <src>\logic（重载生效，变化真正落地）
+        //   - 覆盖等于全局 / 无覆盖   -> 读 GLOBAL data\logic（重载，清掉上一图串味）
+        //   GoodTypesOverrideDiffers() 仅用于日志标记走哪条路，不决定"是否重载"。
+        // ★ goodtypes is processed unconditionally at entry, never SKIPped -- the
+        //   fundamental fix the user asked for ("what if goodtypes.ini changes?").
+        //   Measured main-stack usage is only 5.2KB out of 1MB, so the deep-stack
+        //   overflow theory is refuted by the dumps; running on the caller stack is fine.
+        //   - override present & differs from global -> read MAP <src>\logic (reload)
+        //   - override identical/absent -> read GLOBAL data\logic (reload, clears
+        //     previous map's carryover)
+        //   GoodTypesOverrideDiffers() only labels the log path, it does not gate reload.
         g_redirect = 1;
         ReloadGoodTypesSafe(b);
         g_redirect = 0;
-        g_goodAtEntryOverridden = true;
-        LOG_INFO(kCat, "  goodtypes.ini -> MAP <src>\\logic (reloaded at map entry, pre-StaticObjects)");
+        g_goodAtEntryOverridden = GoodTypesOverrideDiffers();
+        LOG_INFO(kCat, "  goodtypes.ini -> %s (reloaded at entry, pre-StaticObjects)",
+                 g_goodAtEntryOverridden ? "MAP <src>\\logic" : "GLOBAL data\\logic");
     } else {
-        ReloadGoodTypesSafe(b);
-        LOG_INFO(kCat, "  goodtypes.ini -> GLOBAL data\\logic (reloaded at map entry, pre-StaticObjects)");
+        // 地图无 logic\ 目录：完全不碰表（主菜单 demo 图 / 无覆盖图）。
+        // Map has no logic\ folder: leave tables completely untouched.
+        LOG_INFO(kCat, "  goodtypes.ini -> SKIP (map has no logic folder; tables untouched)");
     }
 }
 struct TableEntry { uintptr_t globVa; int size; };
@@ -502,12 +540,13 @@ static const TableEntry kTables[] = {
 // goodtypes 在入口是否已处理（计入 loaders）
 // goodtypes processed at entry? (counted in loaders)
 };
-static void* g_origTables[10] = { nullptr };
+static const int kNumTables = (int)(sizeof(kTables) / sizeof(kTables[0]));
+static void* g_origTables[kNumTables] = { nullptr };
 // 入口是否真用了地图覆盖（计入 overridden）
 // entry actually used the map override? (counted in overridden)
 static bool  g_snapshotted = false;
 static void CopyBackTables(DWORD b) {
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < kNumTables; ++i) {
         if (!g_origTables[i] || !kTables[i].size) continue;
         void* cur = *(void**)(b + (kTables[i].globVa - 0x400000));
         if (cur && cur != g_origTables[i]) {
@@ -561,7 +600,7 @@ static const char* __cdecl PathRewrite(const char* path) {
 //   original pointer (pointer identity never changes).
 // Table global VA + size (0 = skip, dynamic-size tables like atomicanim/tribe/weapon)
     if (!g_mapHasLogic || !g_mapSrcStr[0]) return path;
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < kNumLogicFiles; ++i) {
         if (_stricmp(path, g_canonical[i]) != 0) continue;
 // landscapetypes
 // landscapetypes
@@ -604,21 +643,8 @@ static void ReloadLogicForMap() {
     }
     const char* ident = g_mapSrcStr[0] ? g_mapSrcStr
                       : (g_mapPath && *(char*)g_mapPath) ? (const char*)g_mapPath : "?";
-// 启动时原表指针
-// original table pointers at start-up
-    if (!g_snapshotted) {
-        for (int i = 0; i < 10; ++i)
-
-// 重载后：把新表内容拷回原表地址 + 恢复原指针（指针身份永不变）
-
-// After reload: copy new content back to the original table address + restore pointer
-            g_origTables[i] = *(void**)(b + (kTables[i].globVa - 0x400000));
-        g_snapshotted = true;
-        LOG_INFO(kCat, "[snapshot] original table pointers captured (%d tables)", 10);
-    }
     if (!g_mapHasLogic) {
-        LOG_INFO(kCat, "map has no logic folder, tables untouched (map=%s)", ident);
-        return;
+        LOG_INFO(kCat, "map has no logic folder, reloading GLOBAL tables (clears previous-map carryover)");
     }
     int over = 0, ok = 0;
     g_redirect = 1;
@@ -627,41 +653,20 @@ static void ReloadLogicForMap() {
 #pragma endregion
 
 #pragma region Runtime trampoline (copy copyLen bytes + E9 back to entry+copyLen)
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < kNumLogicFiles; ++i) {
         if (!g_reload[i]) {
             LOG_INFO(kCat, "  %-42s -> SKIPPED (switch off)", kLogicFiles[i].logical);
             continue;
         }
         if (i == 2) {
-            if (g_entryHook) {
-                ++ok;
-                if (g_goodAtEntryOverridden) ++over;
-                continue;
-            }
-            if (!GoodTypesOverrideDiffers()) {
-                LOG_INFO(kCat, "  %-42s -> GLOBAL (override absent/identical, reload skipped)",
-                         kLogicFiles[i].logical);
-                continue;
-
-// 引擎路径可用性检查已弃用：不调 sub_40667B（会开/关 CRT fd、做归档搜索，
-// 在 IniFile_Open 入口里嵌套调用会扰动引擎文件层 -> goodtypes 等表加载失败）。
-// 改用纯 Win32 GetFileAttributesA 探测真实路径（<地图源目录>\logic\X.ini）。
-
-// ---- 路径重定向（仅重载会话内生效；低开销直通）----
-#pragma endregion
-
-// Engine path availability check abandoned: do not call sub_40667B (it opens/closes
-//   CRT fds, does archive searching; calling it nested inside IniFile_Open's entry
-//   perturbs the engine file layer -> goodtypes etc. fail to load). Use plain Win32
-//   GetFileAttributesA to probe the real path (<map source dir>\logic\X.ini).
-
-#pragma region Path rewrite (only active during reload session; low-overhead pass-through)
-            }
-            g_redirect = 1;
+            // goodtypes：始终重载（有 per-map 覆盖则读 MAP，否则读 GLOBAL 清掉上一图串味）。
+            // +36 图形句柄的重新解析（sub_415E8A）在 ReloadGoodTypesSafe 内部完成；
+            // 此时 landscapetypes(i=0) 已先重载，故 +36 查的是 per-map landscape 表。
             ReloadGoodTypesSafe(b);
-            g_redirect = 0;
-            ++ok; ++over;
-            LOG_INFO(kCat, "  %-42s -> MAP <src>\\logic (shadow-safe reload, fallback)", kLogicFiles[i].logical);
+            ++ok;
+            if (g_mapHasLogic) ++over;
+            LOG_INFO(kCat, "  %-42s -> %s", kLogicFiles[i].logical,
+                     g_mapHasLogic ? "MAP <src>\\logic" : "GLOBAL data\\logic");
             continue;
         }
         int r = 0;
@@ -679,17 +684,23 @@ static void ReloadLogicForMap() {
             if (r) ++over;
         }
         void* mgr = *(void**)(b + (kLogicFiles[i].mgrGlob - 0x400000));
-    // 地图源目录：arg1(Source) 非空 = 官方/用户文件夹图的真实源目录；c2m 不支持包内探测
-    // Map source dir: arg1(Source) non-null = real source dir of official/user folder
-    //   map; c2m in-package detection not supported.
+        // 地图源目录：arg1(Source) 非空 = 官方/用户文件夹图的真实源目录；c2m 不支持包内探测
+        // Map source dir: arg1(Source) non-null = real source dir of official/user folder
+        //   map; c2m in-package detection not supported.
         void* fn  = (void*)(b + (kLogicFiles[i].loader - 0x400000));
-        if (mgr && fn) {
-            ((void* (__fastcall*)(void*, void*))fn)(mgr, mgr);
-            ++ok;
-        } else {
-            LOG_WARN(kCat, "loader[%d] %s mgr=%p fn=%p skipped",
+        // 合理性守卫（兜底，防止错位/野指针直接崩溃）：
+        //   loader 必须是 Game.exe 映像内的有效代码指针（0x400000..0x600000）。
+        //   历史上因注释反斜杠吞行导致 kLogicFiles 少编译 1 项、循环却按 12 跑，
+        //   第 12 次迭代读到 kGoodPatches 数据，fn=1 -> call 1 -> EIP=1 崩溃
+        //   （见 5688 dump）。这里把这种「野指针」降级为带详细地址的日志 SKIP。
+        if (!mgr || !fn ||
+            (uintptr_t)fn < 0x400000 || (uintptr_t)fn >= 0x600000) {
+            LOG_WARN(kCat, "loader[%d] %s mgr=%p fn=%p INVALID (skipped, would crash)",
                      i, kLogicFiles[i].logical, mgr, fn);
+            continue;
         }
+        ((void* (__fastcall*)(void*, void*))fn)(mgr, mgr);
+        ++ok;
         LOG_INFO(kCat, "  %-42s -> %s", kLogicFiles[i].logical,
                  r ? "MAP <src>\\logic" : "GLOBAL data\\logic");
     }
@@ -699,8 +710,33 @@ static void ReloadLogicForMap() {
     // First trigger: snapshot original table pointers (must be the start-up-allocated
     //   ones; pointer identity never changes afterwards)
     g_redirect = 0;
-    CopyBackTables(b);
-    LOG_INFO(kCat, "logic reloaded: map=%s loaders=%d/12 overridden=%d/12 (tables copied back to original addresses)",
+
+    // ★ 加固（"改缓存"的二进制层落地）：12 表全部重载完成后，统一重建所有按索引
+    //   缓存的派生 resolver。重载换表会改变部落/物品 type 号这类强耦合索引，必须重算
+    //   派生表，否则缓存的索引指向错槽 -> 错位/#DE。与 goodtypes 内部处理对齐，且覆盖
+    //   其它 11 张表的跨表依赖（good->landscape 图形句柄、land->goodid 索引）。
+    // ★ Hardening (binary-layer "modify the cache"): after all 12 tables reload,
+    //   re-run every index-keyed derived resolver so cached indices can't go stale.
+    {
+        typedef int (__cdecl* ResolveGfxFn)(void);
+        ResolveGfxFn resolveGfx = (ResolveGfxFn)(b + (0x415E8A - 0x400000));
+        int lsCount = *(int*)(b + (0x568C20 - 0x400000));
+        if (lsCount > 0) {
+            resolveGfx();
+            LOG_INFO(kCat, "  [resolver] good->landscape +36 handles re-resolved (sub_415E8A, lsTable=%d)", lsCount);
+        } else {
+            LOG_WARN(kCat, "  [resolver] SKIPPED: landscape gfx table empty (dword_568C20=0)");
+        }
+        typedef void (__thiscall* RebuildIndexFn)(void*);
+        RebuildIndexFn rebuild = (RebuildIndexFn)(b + (0x412B62 - 0x400000));
+        void* idxMgr = *(void**)(b + (0x510F20 - 0x400000));
+        if (rebuild && idxMgr) {
+            rebuild(idxMgr);
+            LOG_INFO(kCat, "  [resolver] land->goodid index rebuilt (sub_412B62)");
+        }
+    }
+
+    LOG_INFO(kCat, "logic reloaded: map=%s loaders=%d/12 overridden=%d/12 (pre-entity, no copy-back)",
              ident, ok, over);
 }
 __declspec(naked) void IniOpenStub() {
@@ -733,14 +769,15 @@ __declspec(naked) void IniOpenStub() {
 // entry handled -> counted in loaders
 }
 __declspec(naked) void PrepMapEntryStub() {
-// 入口真用了覆盖 -> 计入 overridden
-// entry really used override -> counted in overridden
+// 入口即重载全部 12 张 logic 表（位于 sub_41D290 建实体之前 -> 新实体拿正确索引）
+// entry reloads all 12 logic tables (runs BEFORE sub_41D290 creates entities ->
+//   new entities are born with correct per-map indices, no 32664 NULL-deref)
     __asm {
         pushad
         pushfd
         mov  eax, [esp + 0x28]          ; Source（地图源目录）
         mov  [g_mapSrc], eax
-        call dword ptr [p_reload_entry] ; ReloadGoodTypesAtEntry()
+        call dword ptr [p_reload]       ; ReloadLogicForMap()（调用方栈，勿切栈）
         popfd
         popad
         jmp  dword ptr [p_tramp_maploader] ; 原入口 9 字节 trampoline
@@ -754,12 +791,16 @@ __declspec(naked) void PrepCallStub() {
         mov  ecx, [ebp + 0xC]           ; MaxCharCount
         mov  [g_mapSrc], eax
         mov  [g_mapPath], ecx
-        call dword ptr [p_reload]       ; ReloadLogicForMap()
         popfd
         popad
         jmp  dword ptr [p_orig_407A21]  ; 原 sub_407A21(1)；它 ret 回 0x40AA18 -> pop ecx 清栈
     }
 }
+// StaticObjectsStub（已弃用 / retired）：重载已迁回 PrepMapEntryStub（0x40A6F4，
+// 已验证通过），同样严格位于建实体之前。此处保留说明以免误以为 sub_41D290 仍被 hook。
+// StaticObjectsStub (retired): reload moved to PrepMapEntryStub (0x40A6F4, verified),
+// which is also strictly pre-entity.
+
 static bool VerifyBytes(DWORD base, uintptr_t va, const uint8_t* exp, size_t n) {
 // ecx=this, edx 忽略
 // ecx=this, edx ignored
@@ -798,16 +839,16 @@ public:
         DWORD b = ver.GetBaseAddress();
         g_dbg = cfg.GetBool(kName, "Debug", true);
         int on = 0;
-        for (int i = 0; i < 12; ++i) {
+        for (int i = 0; i < kNumLogicFiles; ++i) {
             g_reload[i] = cfg.GetBool(kName, kReloadKeys[i], true);
             if (g_reload[i]) ++on;
         }
-        LOG_INFO(kCat, "per-table reload switches: %d/12 on", on);
+        LOG_INFO(kCat, "per-table reload switches: %d/%d on", on, kNumLogicFiles);
         const uint8_t kCallOp = 0xE8;
         if (!VerifyBytes(b, VA_PrepCall, &kCallOp, 1)) return false;
         const uint8_t kIniPro[9] = { 0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x08, 0x03, 0x00, 0x00 };
         if (!VerifyBytes(b, VA_IniFileOpen, kIniPro, sizeof(kIniPro))) return false;
-        for (int i = 0; i < 12; ++i)
+        for (int i = 0; i < kNumLogicFiles; ++i)
             sprintf_s(g_canonical[i], "data\\logic\\%s", kLogicFiles[i].logical);
         uintptr_t iniEntry = b + (VA_IniFileOpen - 0x400000);
         uintptr_t tramp = MakeTrampoline(iniEntry, 9);
@@ -859,10 +900,9 @@ public:
 // ===================================================================
             if (mTramp) {
                 p_tramp_maploader = (void*)mTramp;
-                p_reload_entry    = (void*)&ReloadGoodTypesAtEntry;
                 if (Patch::WriteJmp(mapEntry, (uintptr_t)&PrepMapEntryStub, 0)) {
                     g_entryHook = true;
-                    LOG_INFO(kCat, "  entry hook OK: 0x%X -> PrepMapEntryStub (goodtypes pre-StaticObjects)",
+                    LOG_INFO(kCat, "  entry hook OK: 0x%X -> PrepMapEntryStub (reload all 12 logic tables pre-entity)",
                              (unsigned)VA_MapLoaderEntry);
                 } else {
                     LOG_WARN(kCat, "entry hook WriteJmp failed @0x%X", (unsigned)VA_MapLoaderEntry);
@@ -894,9 +934,18 @@ public:
             LOG_ERROR(kCat, "prep-call patch failed @0x%X", (unsigned)VA_PrepCall);
             return false;
         }
+// ---- 钩子 3（已弃用 / retired）----
+//   曾尝试 hook sub_41D290（[StaticObjects]/建实体入口）在实体创建前重载，但当前
+//   运行版 Game.exe 在该 VA 的 prologue 与 IDA .i64 不一致，VerifyBytes 必失败，
+//   且该 hook 一旦不装上时整功能即失效。故改为在更靠前的 MapLoader 入口 0x40A6F4
+//   （PrepMapEntryStub，已验证通过）重载。该入口同样位于 sub_41D290 建实体之前，
+//   时机等价（实体诞生前重载），同样根除 32664，且不在启动日志刷失败告警。
+//   Hook 3 (retired): the sub_41D290 attempt is removed; the reload now happens in
+//   PrepMapEntryStub (0x40A6F4, verified) which is also strictly pre-entity.
+
         g_installed = true;
-        LOG_INFO(kCat, "installed: entry 0x%X(gt=%d) + call 0x%X -> PrepCallStub; IniFile_Open hooked",
-                 (unsigned)VA_MapLoaderEntry, (int)g_entryHook, (unsigned)VA_PrepCall);
+        LOG_INFO(kCat, "installed: MapLoaderEntry 0x%X(reload-all-12 pre-entity) + PrepCall 0x%X; IniFile_Open hooked",
+                 (unsigned)VA_MapLoaderEntry, (unsigned)VA_PrepCall);
         if (g_dbg)
             LOG_INFO(kCat, "  map logic folder: <map source dir>\\logic\\*  (same layout as data\\logic; c2m maps not supported)");
 

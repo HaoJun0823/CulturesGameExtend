@@ -40,6 +40,10 @@ namespace ge_paths {
     // Unofficial patch config (kept in a separate file to decouple from the framework config)
     constexpr const char* kPatchesIni = "CulturesGameExtend_Patches.ini";
 
+    // 自定义安全补丁配置（独立于上游 CulturesPatches，便于未来同步上游）
+    // Custom safety patch config (independent of upstream CulturesPatches)
+    constexpr const char* kCustomSafetyIni = "CulturesGameExtend_CustomSafety.ini";
+
     // 主日志文件名
 
     // Main log file name
@@ -54,6 +58,7 @@ namespace ge_paths {
     inline std::string GlobalIniPath()  { return Join(kConfigDir, kGlobalIni); }
     inline std::string GameIniPath()    { return Join(kConfigDir, kGameIni); }
     inline std::string PatchesIniPath() { return Join(kConfigDir, kPatchesIni); }
+    inline std::string CustomSafetyIniPath() { return Join(kConfigDir, kCustomSafetyIni); }
 
     // 返回主程序（exe）所在目录，带尾部反斜杠（如 "C:\\Game\\"）。
     // 解析失败时返回空字符串，调用方需自行兜底。
