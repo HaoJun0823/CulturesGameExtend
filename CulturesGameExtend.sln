@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 15
+VisualStudioVersion = 15.0.37530.8
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CulturesGameExtend", "CulturesGameExtend\CulturesGameExtend.vcxproj", "{8E7903D5-DA04-480F-8D98-95235E599E74}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "CulturesProxyDLL", "CulturesProxyDLL\CulturesProxyDLL.vcxproj", "{8AE36C9D-4269-4D58-BA51-9501158802BC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Win32 = Debug|Win32
+		Release|Win32 = Release|Win32
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8E7903D5-DA04-480F-8D98-95235E599E74}.Debug|Win32.ActiveCfg = Debug|Win32
+		{8E7903D5-DA04-480F-8D98-95235E599E74}.Debug|Win32.Build.0 = Debug|Win32
+		{8E7903D5-DA04-480F-8D98-95235E599E74}.Release|Win32.ActiveCfg = Release|Win32
+		{8E7903D5-DA04-480F-8D98-95235E599E74}.Release|Win32.Build.0 = Release|Win32
+		{8AE36C9D-4269-4D58-BA51-9501158802BC}.Debug|Win32.ActiveCfg = Debug|Win32
+		{8AE36C9D-4269-4D58-BA51-9501158802BC}.Debug|Win32.Build.0 = Debug|Win32
+		{8AE36C9D-4269-4D58-BA51-9501158802BC}.Release|Win32.ActiveCfg = Release|Win32
+		{8AE36C9D-4269-4D58-BA51-9501158802BC}.Release|Win32.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {343DD8A8-57B1-4904-9594-726810A3ED6A}
+	EndGlobalSection
+EndGlobal
