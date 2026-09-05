@@ -57,6 +57,18 @@
 //   Cave checks this->0x78 < dword_5112F8, else jumps to the game's own early-out 0x42E646.
 #include "Features/AtomicAnimGuardFeature.cpp"
 
+// fun 系作弊码移植：C3CD.exe 资料盘的 7 个反转作弊码（funexplore/funhigh/
+// funnorm/funlow/funmapsmall/funmapverybig/funcolors）带到 Game.exe。
+// hook pamagem 块的 call _strncmp（0x4BB174，E8 rel32 重定向到 naked 中继，
+// 零 stolen bytes），复刻 C3CD 原版全部安全门控（多人禁 explore、速度对象
+// 判存、截图许可检查）。
+// Fun cheat codes: brings the 7 reversed cheat codes from the C3CD.exe
+// add-on disc to Game.exe. Hooks the pamagem block's call _strncmp
+// (0x4BB174, E8 rel32 redirected to a naked relay, zero stolen bytes),
+// replicating every C3CD safety gate (multiplayer blocks explore; speed
+// codes require the speed object; screenshot codes keep the license check).
+#include "Features/FunCheatsFeature.cpp"
+
 #pragma region Log level parsing
 // Map log level string -> enum
 namespace {
