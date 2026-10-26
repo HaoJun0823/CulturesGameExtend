@@ -1,20 +1,37 @@
 # CulturesGameExtend
 
-> **License: GNU General Public License v3.0-or-later (GPL-3.0-or-later)**
+> ⚠️ **Read before use / Disclaimer and licence notice**
+>
+> This is an unofficial, personal fan project. It is **not authorised by the game's
+> rights holder**; installing it modifies or injects into the game files and **may
+> conflict with the game's EULA**. Judge for yourself whether your use is permitted;
+> you bear the risk. **Back up your saves and original files before installing.**
+>
+> **Commercial use is prohibited.** If you redistribute a modified version you must
+> publish the complete source and a record of your changes, and keep the original
+> author's credits. The author is not liable for any consequence of use and does not
+> own the game or its original assets. See [`LICENSE`](./LICENSE).
+
+> **License: HJNCSA-1.0 (non-commercial source-available), base: Apache License 2.0**
 > Copyright (C) 2026 CulturesGameExtend & CulturesGameLocalization 贡献者
 >
-> This project is free software released under the GPL-3.0-or-later. You may
-> redistribute and/or modify it under the terms of the GNU General Public License as
-> published by the Free Software Foundation. See [`LICENSE.txt`](./LICENSE.txt).
+> This project is **not open source**: commercial use is not permitted. It is licensed
+> under HJNCSA-1.0 (HaoJun0823 Non-Commercial Source-Available License 1.0), which is
+> the Apache License 2.0 plus additional non-commercial and source-disclosure
+> conditions. It must not be called "Apache" or "Apache-2.0" alone.
+> See [`LICENSE`](./LICENSE) and [`LICENSES/Apache-2.0.txt`](./LICENSES/Apache-2.0.txt).
 >
-> **Upstream / third-party attribution (license retained):**
-> - Map format tooling (`cif2ini`, `c2mextracter`, `map.dat`/`c2m` converters) is based
->   on **Mikulus6/Cultures-map-editor** (GPL-3.0) and the **Cultures2-dat-format**
->   project, both derived from the 2010 XeNTaX forums cif research. Original copyright
->   notices of those projects are preserved in their respective source files under
->   `maptools/` and `Tools/`.
-> - Any code added by the contributors of *CulturesGameExtend* / *CulturesGameLocalization*
->   is Copyright (C) 2026 the respective contributors and licensed under GPL-3.0-or-later.
+> **Upstream / third-party attribution (licence retained):**
+> - Map format tooling (`ini_dat_to_c2m.py`, `cif2ini`, `c2mextracter`, `map.dat`/`c2m`
+>   converters) is based on **Mikulus6/Cultures-map-editor** (GPL-3.0) and the
+>   **Cultures2-dat-format** project, both derived from the 2010 XeNTaX forums cif
+>   research. Original copyright notices of those projects are preserved in their
+>   respective source files under `maptools/` and `Tools/`. **Those files remain under
+>   GPL-3.0-or-later; the file-level notice prevails over the licence above, and the
+>   non-commercial condition does not apply to them.**
+> - Any other code added by the contributors of *CulturesGameExtend* /
+>   *CulturesGameLocalization* is Copyright (C) 2026 the respective contributors and
+>   licensed under HJNCSA-1.0 as stated above.
 
 A community extension DLL for **Cultures** / **Cultures 2: Gates of Asgard** (the
 *Gates of Asgard* / *Die Saga* line by Funatics). It is loaded into the game
@@ -314,4 +331,4 @@ contributors for their research and tooling.
 - [Mikulus](https://github.com/Mikulus6): "*Cultures map editor*" (2025) — <https://github.com/Mikulus6/Cultures-map-editor>
 
 > *Cultures* is the property of [Funatics Development](https://www.funatics.de/) with all
-> rights reserved; it is not covered by the GPL-3.0-or-later license.
+> rights reserved; it is not covered by any licence granted by this project.

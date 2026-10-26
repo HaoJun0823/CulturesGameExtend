@@ -636,8 +636,18 @@ and does not itself modify or grant any license.
     this project imposes on them no restriction beyond what their own
     licenses require.
 
-    （暂无。本仓库未随附任何需收录许可全文的第三方组件。）
-    (None. No third-party component requiring a license text is bundled.)
+    - ini_dat_to_c2m.py（maptools/）
+      GPL-3.0-or-later -- Copyright (C) Mikulus6 及 Cultures2-dat-format 贡献者
+      参见 See ./LICENSES/GPLv3.txt
+      用途 Used for: ini/cif 转换与 c2m 打包解包 / ini-cif conversion and c2m packing
+      说明 Note: 提取自 Mikulus6/Cultures-map-editor 与 Cultures2-dat-format
+      两个 GPL-3.0 项目（源自 2010 XeNTaX 论坛 cif 研究）。该文件头部
+      SPDX 声明（GPL-3.0-or-later）优先于本许可；本许可第 3 节的附加
+      条件不适用于该文件。
+      Extracted from Mikulus6/Cultures-map-editor and Cultures2-dat-format
+      (both GPL-3.0, derived from 2010 XeNTaX cif research). The file-level
+      SPDX notice (GPL-3.0-or-later) prevails over this license; the
+      additional conditions in Section 3 do not apply to that file.
 
 6.5 逐字全文与文件级声明 / Verbatim texts and file-level notices
     上文提及的每一项许可，其全文均逐字收录于 ./LICENSES/，本项目未作
